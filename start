@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+
+cd "$ROOT_DIR"
+
+require_command() {
+  local command_name="$1"
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "Erreur: commande introuvable: $command_name" >&2
+    exit 1
+  fi
+}
+
+port_listener_pid() {
+  local port="$1"
+  lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | head -n 1
+}
+
+cleanup() {
+  local exit_code=$?
+
+  if [[ -n "${API_PID:-}" ]] && kill -0 "$API_PID" >/dev/null 2>&1; then
+    kill "$API_PID" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "${WIDGET_PID:-}" ]] && kill -0 "$WIDGET_PID" >/dev/null 2>&1; then
+    kill "$WIDGET_PID" >/dev/null 2>&1 || true
+  fi
+
+  wait >/dev/null 2>&1 || true
+  exit "$exit_code"
+}
+
+wait_for_port() {
+  local host="$1"
+  local port="$2"
+  local retries="${3:-30}"
+
+  for ((i = 1; i <= retries; i++)); do
+    if bash -c ">/dev/tcp/$host/$port" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  return 1
+}
+
+wait_for_process_exit() {
+  if [[ -z "${API_PID:-}" && -z "${WIDGET_PID:-}" ]]; then
+    return 0
+  fi
+
+  while true; do
+    if [[ -n "${API_PID:-}" ]] && ! kill -0 "$API_PID" >/dev/null 2>&1; then
+      wait "$API_PID" || true
+      echo "L'API s'est arrêtée." >&2
+      return 1
+    fi
+
+    if [[ -n "${WIDGET_PID:-}" ]] && ! kill -0 "$WIDGET_PID" >/dev/null 2>&1; then
+      wait "$WIDGET_PID" || true
+      echo "Le widget s'est arrêté." >&2
+      return 1
+    fi
+
+    sleep 1
+  done
+}
+
+trap cleanup INT TERM EXIT
+
+require_command docker
+require_command npm
+require_command lsof
+require_command curl
+
+if docker compose version >/dev/null 2>&1; then
+  DOCKER_COMPOSE=(docker compose)
+elif command -v docker-compose >/dev/null 2>&1; then
+  DOCKER_COMPOSE=(docker-compose)
+else
+  echo "Erreur: ni 'docker compose' ni 'docker-compose' n'est disponible." >&2
+  exit 1
+fi
+
+if [[ ! -f "$ROOT_DIR/.env" ]]; then
+  echo "Erreur: fichier .env manquant. Copiez .env.example vers .env." >&2
+  exit 1
+fi
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "Erreur: environnement Python introuvable dans .venv." >&2
+  echo "Créez-le avec: python -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
+  exit 1
+fi
+
+if [[ ! -d "$ROOT_DIR/widget/node_modules" ]]; then
+  echo "Erreur: dépendances front absentes dans widget/node_modules." >&2
+  echo "Installez-les avec: cd widget && npm install" >&2
+  exit 1
+fi
+
+echo "Lancement de PostgreSQL..."
+"${DOCKER_COMPOSE[@]}" up -d postgres
+
+echo "Attente de PostgreSQL sur localhost:5432..."
+if ! wait_for_port 127.0.0.1 5432 45; then
+  echo "Erreur: PostgreSQL n'a pas répondu sur le port 5432." >&2
+  exit 1
+fi
+
+API_EXISTING_PID="$(port_listener_pid 8000 || true)"
+if [[ -n "$API_EXISTING_PID" ]]; then
+  echo "Port 8000 déjà utilisé. Vérification de l'API existante..."
+  if ! curl -fsS http://127.0.0.1:8000/health >/dev/null; then
+    echo "Erreur: le port 8000 est occupé, mais l'API ne répond pas correctement." >&2
+    exit 1
+  fi
+  echo "API déjà disponible sur http://localhost:8000."
+else
+  echo "Démarrage de l'API sur http://localhost:8000 ..."
+  "$PYTHON_BIN" main.py &
+  API_PID=$!
+
+  echo "Attente de l'API sur localhost:8000..."
+  if ! wait_for_port 127.0.0.1 8000 20; then
+    echo "Erreur: l'API ne s'est pas lancée correctement. Vérifiez PostgreSQL et DATABASE_URL." >&2
+    exit 1
+  fi
+
+  if ! curl -fsS http://127.0.0.1:8000/health >/dev/null; then
+    echo "Erreur: l'API écoute sur 8000 mais /health ne répond pas." >&2
+    exit 1
+  fi
+fi
+
+WIDGET_EXISTING_PID="$(port_listener_pid 5173 || true)"
+if [[ -n "$WIDGET_EXISTING_PID" ]]; then
+  echo "Port 5173 déjà utilisé. Réutilisation du serveur widget existant."
+else
+  echo "Démarrage du widget sur http://localhost:5173 ..."
+  (
+    cd "$ROOT_DIR/widget"
+    npm run dev
+  ) &
+  WIDGET_PID=$!
+
+  if ! wait_for_port 127.0.0.1 5173 20; then
+    echo "Erreur: le widget ne s'est pas lancé correctement sur 5173." >&2
+    exit 1
+  fi
+fi
+
+echo "Services lancés. Ctrl+C pour arrêter."
+
+wait_for_process_exit
