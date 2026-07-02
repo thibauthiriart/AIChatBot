@@ -32,6 +32,16 @@ const messages = ref<ChatMessage[]>([
 
 const canSend = computed(() => draft.value.trim().length > 0 && !isLoading.value)
 
+function buildErrorMessage(error: unknown, apiUrl: string): string {
+  if (error instanceof Error) {
+    if (error.message === 'Failed to fetch') {
+      return `Impossible de joindre l'API sur ${apiUrl}. Vérifiez que le backend tourne et que SITE_ALLOWED_ORIGINS autorise l'origine du widget.`
+    }
+    return error.message
+  }
+  return `Le service est indisponible. Vérifiez que l'API est accessible sur ${apiUrl}.`
+}
+
 async function sendMessage() {
   const message = draft.value.trim()
   if (!message || isLoading.value) return
@@ -52,7 +62,30 @@ async function sendMessage() {
     })
 
     if (!response.ok) {
-      throw new Error('Chat request failed')
+      let detail = ''
+
+      try {
+        const payload = await response.json()
+        if (typeof payload?.detail === 'string' && payload.detail.trim()) {
+          detail = payload.detail.trim()
+        }
+      } catch {
+        detail = ''
+      }
+
+      if (response.status === 403) {
+        throw new Error("Accès refusé par l'API. Vérifiez SITE_ALLOWED_ORIGINS.")
+      }
+
+      if (response.status === 429) {
+        throw new Error('Trop de requêtes. Réessayez dans une minute.')
+      }
+
+      if (response.status >= 500) {
+        throw new Error(detail || "L'API a rencontré une erreur interne.")
+      }
+
+      throw new Error(detail || `La requête a échoué (${response.status}).`)
     }
 
     const data = await response.json()
@@ -60,10 +93,10 @@ async function sendMessage() {
       role: 'agent',
       content: data.answer
     })
-  } catch {
+  } catch (error) {
     messages.value.push({
       role: 'agent',
-      content: "Le service est temporairement indisponible."
+      content: buildErrorMessage(error, props.apiUrl)
     })
   } finally {
     isLoading.value = false
