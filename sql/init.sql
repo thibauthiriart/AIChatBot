@@ -1,4 +1,3 @@
-CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE IF NOT EXISTS sites (
@@ -25,11 +24,9 @@ CREATE TABLE IF NOT EXISTS chunks (
   site_id UUID NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
   chunk_index INTEGER NOT NULL,
   content TEXT NOT NULL,
-  embedding vector(1536) NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(document_id, chunk_index)
 );
 
 CREATE INDEX IF NOT EXISTS chunks_site_idx ON chunks(site_id);
 CREATE INDEX IF NOT EXISTS documents_site_idx ON documents(site_id);
-CREATE INDEX IF NOT EXISTS chunks_embedding_idx ON chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);

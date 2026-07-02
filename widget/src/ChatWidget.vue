@@ -10,7 +10,6 @@ type Source = {
 type ChatMessage = {
   role: 'visitor' | 'agent'
   content: string
-  sources?: Source[]
 }
 
 const props = withDefaults(
@@ -37,6 +36,10 @@ async function sendMessage() {
   const message = draft.value.trim()
   if (!message || isLoading.value) return
 
+  const history = messages.value
+    .slice(-6)
+    .filter((item) => !(item.role === 'agent' && item.content === 'Bonjour, posez-moi une question sur le site.'))
+    .map((item) => ({ role: item.role, content: item.content }))
   messages.value.push({ role: 'visitor', content: message })
   draft.value = ''
   isLoading.value = true
@@ -45,7 +48,7 @@ async function sendMessage() {
     const response = await fetch(`${props.apiUrl.replace(/\/$/, '')}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ site_id: props.siteId, message })
+      body: JSON.stringify({ site_id: props.siteId, message, history })
     })
 
     if (!response.ok) {
@@ -55,8 +58,7 @@ async function sendMessage() {
     const data = await response.json()
     messages.value.push({
       role: 'agent',
-      content: data.answer,
-      sources: data.sources || []
+      content: data.answer
     })
   } catch {
     messages.value.push({
@@ -66,6 +68,12 @@ async function sendMessage() {
   } finally {
     isLoading.value = false
   }
+}
+
+function onTextareaKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Enter' || event.shiftKey) return
+  event.preventDefault()
+  void sendMessage()
 }
 </script>
 
@@ -89,23 +97,18 @@ async function sendMessage() {
           :class="`agentia__message--${message.role}`"
         >
           <p>{{ message.content }}</p>
-          <div v-if="message.sources?.length" class="agentia__sources">
-            <a
-              v-for="source in message.sources"
-              :key="source.url"
-              :href="source.url"
-              target="_blank"
-              rel="noreferrer"
-            >
-              {{ source.title || source.url }}
-            </a>
-          </div>
         </article>
         <p v-if="isLoading" class="agentia__typing">...</p>
       </div>
 
       <form class="agentia__form" @submit.prevent="sendMessage">
-        <textarea v-model="draft" rows="2" maxlength="1200" placeholder="Votre question" />
+        <textarea
+          v-model="draft"
+          rows="2"
+          maxlength="1200"
+          placeholder="Votre question"
+          @keydown="onTextareaKeydown"
+        />
         <button type="submit" :disabled="!canSend">Envoyer</button>
       </form>
     </div>

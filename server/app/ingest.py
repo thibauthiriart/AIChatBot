@@ -8,7 +8,6 @@ import httpx
 from bs4 import BeautifulSoup
 
 from server.app.db import db
-from server.app.openai_client import embed_texts
 
 MAX_CHUNK_CHARS = 1200
 CHUNK_OVERLAP_CHARS = 180
@@ -67,10 +66,10 @@ async def ingest_urls(site_id: str, urls: list[str]) -> tuple[int, int]:
 
         content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
         chunks = _chunk_text(text)
-        embeddings = await embed_texts(chunks)
 
         async with db.acquire() as connection:
             async with connection.transaction():
+                has_embedding_column = await _chunks_table_has_embedding(connection)
                 document_id = await connection.fetchval(
                     """
                     INSERT INTO documents(site_id, url, title, content_hash, updated_at)
@@ -85,22 +84,48 @@ async def ingest_urls(site_id: str, urls: list[str]) -> tuple[int, int]:
                     content_hash,
                 )
                 await connection.execute("DELETE FROM chunks WHERE document_id = $1::uuid", document_id)
-                for index, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                    await connection.execute(
-                        """
-                        INSERT INTO chunks(document_id, site_id, chunk_index, content, embedding)
-                        VALUES($1::uuid, $2::uuid, $3, $4, $5::vector)
-                        """,
-                        document_id,
-                        site_id,
-                        index,
-                        chunk,
-                        _to_vector(embedding),
-                    )
+                for index, chunk in enumerate(chunks):
+                    if has_embedding_column:
+                        await connection.execute(
+                            """
+                            INSERT INTO chunks(document_id, site_id, chunk_index, content, embedding)
+                            VALUES($1::uuid, $2::uuid, $3, $4, $5::vector)
+                            """,
+                            document_id,
+                            site_id,
+                            index,
+                            chunk,
+                            _zero_vector(),
+                        )
+                    else:
+                        await connection.execute(
+                            """
+                            INSERT INTO chunks(document_id, site_id, chunk_index, content)
+                            VALUES($1::uuid, $2::uuid, $3, $4)
+                            """,
+                            document_id,
+                            site_id,
+                            index,
+                            chunk,
+                        )
         indexed_documents += 1
         indexed_chunks += len(chunks)
     return indexed_documents, indexed_chunks
 
 
-def _to_vector(values: list[float]) -> str:
-    return "[" + ",".join(f"{value:.8f}" for value in values) + "]"
+async def _chunks_table_has_embedding(connection) -> bool:
+    return bool(
+        await connection.fetchval(
+            """
+            SELECT EXISTS (
+              SELECT 1
+              FROM information_schema.columns
+              WHERE table_name = 'chunks' AND column_name = 'embedding'
+            )
+            """
+        )
+    )
+
+
+def _zero_vector() -> str:
+    return "[" + ",".join("0" for _ in range(1536)) + "]"

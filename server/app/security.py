@@ -47,19 +47,3 @@ def enforce_admin_token(x_admin_token: Optional[str] = Header(default=None)) -> 
     expected = get_settings().admin_api_token
     if expected and x_admin_token != expected:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin token")
-
-
-def is_obviously_general_chat(message: str) -> bool:
-    lowered = message.lower()
-    blocked_keywords = [
-        "recette",
-        "tarte",
-        "blague",
-        "poème",
-        "poeme",
-        "raconte-moi",
-        "code moi",
-        "écris un mail",
-        "ecris un mail",
-    ]
-    return any(keyword in lowered for keyword in blocked_keywords)

@@ -11,12 +11,10 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://agent:agent@localhost:5432/agentia"
     openai_api_key: str = ""
     openai_base_url: Optional[str] = None
-    openai_embedding_model: str = "text-embedding-3-small"
-    openai_embedding_dimensions: int = 1536
+    openai_router_model: str = "gpt-4.1-mini"
     openai_chat_model: str = "moonshotai/kimi-k2"
     admin_api_token: str = ""
     chat_max_context_chunks: int = 6
-    chat_min_relevance: float = 0.24
     chat_rate_limit_per_minute: int = 10
     site_allowed_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]

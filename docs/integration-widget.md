@@ -10,8 +10,7 @@ La logique sensible reste cote API:
 
 - cle OpenAI
 - base PostgreSQL
-- recherche vectorielle
-- verification que la question concerne bien le site
+- recherche textuelle dans les contenus indexes
 - generation de la reponse
 
 Ne mettez jamais la cle OpenAI dans le code du site public.
@@ -24,10 +23,9 @@ En resume:
 
 1. Le widget ne fait qu'afficher l'interface et envoyer les questions.
 2. L'API verifie que la demande est autorisee.
-3. La question est transformee en embedding.
-4. PostgreSQL + pgvector cherche les passages du site les plus proches.
-5. Si aucun passage n'est assez proche, l'API refuse de repondre hors sujet.
-6. Si des passages sont trouves, OpenAI genere une reponse uniquement avec ce contexte.
+3. PostgreSQL cherche les passages du site les plus proches en texte.
+4. Si aucun passage ne correspond directement, l'API prend un contexte de repli parmi les contenus indexes.
+5. OpenAI genere une reponse uniquement avec ce contexte.
 
 ## Prerequis
 
@@ -183,11 +181,7 @@ Une fois ce code ajoute, le bouton du chat apparait en bas a droite du site.
 Donne-moi une recette de tarte aux pommes
 ```
 
-La reponse attendue est:
-
-```text
-Le site ne traite pas de ce sujet.
-```
+La reponse ne sera plus bloquee par un seuil de pertinence. Elle sera produite a partir du contexte disponible sur le site.
 
 ## Erreurs frequentes
 
@@ -216,7 +210,6 @@ Verifiez que:
 
 - les pages ont bien ete indexees avec `/ingest`.
 - le `siteId` dans le snippet est correct.
-- la question concerne vraiment une page indexee.
 - `OPENAI_API_KEY` est bien configure cote API.
 
 ### Erreur 401 sur `/sites` ou `/ingest`
@@ -236,12 +229,10 @@ Exemple `.env` cote API:
 ```env
 DATABASE_URL=postgresql://agent:motdepasse@postgres:5432/agentia
 OPENAI_API_KEY=sk-your-key
-OPENAI_EMBEDDING_MODEL=text-embedding-3-small
-OPENAI_EMBEDDING_DIMENSIONS=1536
+OPENAI_ROUTER_MODEL=gpt-4.1-mini
 OPENAI_CHAT_MODEL=gpt-4.1-mini
 ADMIN_API_TOKEN=un-token-long-et-secret
 CHAT_MAX_CONTEXT_CHUNKS=6
-CHAT_MIN_RELEVANCE=0.24
 CHAT_RATE_LIMIT_PER_MINUTE=20
 SITE_ALLOWED_ORIGINS=https://www.votre-site.com
 ```

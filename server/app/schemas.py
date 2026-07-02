@@ -24,9 +24,26 @@ class IngestResult(BaseModel):
     indexed_chunks: int
 
 
+class ConversationMessage(BaseModel):
+    role: str = Field(pattern="^(visitor|agent)$")
+    content: str = Field(min_length=1, max_length=2000)
+
+
 class ChatRequest(BaseModel):
     site_id: str
     message: str = Field(min_length=1, max_length=1200)
+    history: list[ConversationMessage] = Field(default_factory=list, max_length=8)
+
+
+class RouteDecision(BaseModel):
+    decision: str = Field(pattern="^(allow|deny)$")
+    category: str = Field(pattern="^(greeting|site|deny)$")
+    reason: str = Field(min_length=1, max_length=200)
+
+
+class RewriteDecision(BaseModel):
+    rewritten_message: str = Field(min_length=1, max_length=1200)
+    used_history: bool
 
 
 class Source(BaseModel):

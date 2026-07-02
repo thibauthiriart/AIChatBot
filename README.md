@@ -3,8 +3,8 @@
 Base d'agent conversationnel spécialisé pour un site web:
 
 - API FastAPI en Python.
-- PostgreSQL avec l'extension `pgvector`.
-- Ingestion de pages du site, découpage en chunks et vectorisation.
+- PostgreSQL.
+- Ingestion de pages du site et découpage en chunks.
 - Endpoint `/chat` qui répond uniquement à partir des contenus indexés.
 - Widget Vue embeddable.
 
@@ -66,7 +66,7 @@ curl -X POST http://localhost:8000/chat \
   -d '{"site_id":"SITE_ID","message":"Que propose ce site ?"}'
 ```
 
-Si aucune information pertinente n'est trouvée, la réponse est:
+Si aucune information n'est trouvée dans les contenus indexes, la reponse est:
 
 ```text
 Le site ne traite pas de ce sujet.
@@ -114,10 +114,10 @@ La base inclut plusieurs garde-fous:
 - CORS limité par `SITE_ALLOWED_ORIGINS`.
 - Token admin `X-Admin-Token` sur `/sites` et `/ingest`.
 - Rate limit simple par IP sur `/chat`.
-- Refus immédiat de quelques demandes manifestement généralistes.
-- Recherche vectorielle obligatoire avant génération.
-- Seuil minimal de pertinence `CHAT_MIN_RELEVANCE`.
+- Routage LLM avant reponse pour bloquer les attaques de prompt et les demandes hors perimetre.
 - Prompt système qui force la réponse à partir du contexte indexé uniquement.
 - Sources retournées avec la réponse pour audit.
+
+Modele de routage par defaut: `OPENAI_ROUTER_MODEL=gpt-4.1-mini`.
 
 Pour un usage production, ajoutez une clé publique par site côté widget, une file de jobs pour l'indexation, et un rate limit distribué type Redis.
