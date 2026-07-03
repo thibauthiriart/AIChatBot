@@ -1,0 +1,6 @@
+DROP INDEX IF EXISTS chunks_embedding_idx;
+
+ALTER TABLE chunks
+DROP COLUMN IF EXISTS embedding;
+
+DROP EXTENSION IF EXISTS vector;

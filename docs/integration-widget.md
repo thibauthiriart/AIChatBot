@@ -230,7 +230,7 @@ Exemple `.env` cote API:
 DATABASE_URL=postgresql://agent:motdepasse@postgres:5432/agentia
 OPENAI_API_KEY=sk-your-key
 OPENAI_ROUTER_MODEL=gpt-4.1-mini
-OPENAI_CHAT_MODEL=gpt-4.1-mini
+OPENAI_CHAT_MODEL=moonshotai/kimi-k2.5
 ADMIN_API_TOKEN=un-token-long-et-secret
 CHAT_MAX_CONTEXT_CHUNKS=6
 CHAT_RATE_LIMIT_PER_MINUTE=20

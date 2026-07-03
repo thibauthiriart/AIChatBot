@@ -1,16 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-
-type Source = {
-  url: string
-  title: string
-  score: number
-}
-
-type ChatMessage = {
-  role: 'visitor' | 'agent'
-  content: string
-}
+import { buildRequestHistory, prepareOutgoingMessage, type ChatMessage, WELCOME_MESSAGE } from './chatPayload'
 
 const props = withDefaults(
   defineProps<{
@@ -26,9 +16,7 @@ const props = withDefaults(
 const isOpen = ref(false)
 const isLoading = ref(false)
 const draft = ref('')
-const messages = ref<ChatMessage[]>([
-  { role: 'agent', content: 'Bonjour, posez-moi une question sur le site.' }
-])
+const messages = ref<ChatMessage[]>([{ role: 'agent', content: WELCOME_MESSAGE }])
 
 const canSend = computed(() => draft.value.trim().length > 0 && !isLoading.value)
 
@@ -43,13 +31,10 @@ function buildErrorMessage(error: unknown, apiUrl: string): string {
 }
 
 async function sendMessage() {
-  const message = draft.value.trim()
+  const message = prepareOutgoingMessage(draft.value)
   if (!message || isLoading.value) return
 
-  const history = messages.value
-    .slice(-6)
-    .filter((item) => !(item.role === 'agent' && item.content === 'Bonjour, posez-moi une question sur le site.'))
-    .map((item) => ({ role: item.role, content: item.content }))
+  const history = buildRequestHistory(messages.value)
   messages.value.push({ role: 'visitor', content: message })
   draft.value = ''
   isLoading.value = true

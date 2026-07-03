@@ -3,15 +3,17 @@ from __future__ import annotations
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from server.app.booking import BookingService
 from server.app.config import get_settings
 from server.app.db import db
 from server.app.ingest import ingest_urls
 from server.app.openai_client import generate_answer, rewrite_user_message, route_user_message
 from server.app.retrieval import retrieve_context
-from server.app.schemas import ChatRequest, ChatResponse, IngestRequest, IngestResult, Site, SiteCreate, Source
+from server.app.schemas import ChatRequest, ChatResponse, ChatUsage, IngestRequest, IngestResult, ModelUsage, Site, SiteCreate, Source
 from server.app.security import enforce_admin_token, enforce_origin, enforce_rate_limit
 
 settings = get_settings()
+booking_service = BookingService(settings)
 
 app = FastAPI(title="Agent IA Conversation", version="0.1.0")
 app.add_middleware(
@@ -65,14 +67,24 @@ async def ingest(payload: IngestRequest) -> IngestResult:
 
 @app.post("/chat", response_model=ChatResponse, dependencies=[Depends(enforce_origin), Depends(enforce_rate_limit)])
 async def chat(payload: ChatRequest) -> ChatResponse:
-    route = await route_user_message(payload.message, payload.history)
+    route, route_usage = await route_user_message(payload.message, payload.history)
     if route.decision != "allow":
-        return ChatResponse(answer="Ce n'est pas possible.")
+        return ChatResponse(answer="Ce n'est pas possible.", usage=_build_usage(route=route_usage))
 
     if route.category == "greeting":
-        return ChatResponse(answer="Bonjour, comment puis-je vous aider au sujet du site ?")
+        return ChatResponse(
+            answer="Bonjour, comment puis-je vous aider au sujet du site ? Si vous le souhaitez, je peux aussi vous orienter vers un premier echange ou un audit selon votre besoin.",
+            usage=_build_usage(route=route_usage),
+        )
 
-    rewritten = await rewrite_user_message(payload.message, payload.history)
+    if route.category == "appointment":
+        booking_result = await booking_service.handle_message(payload.message, payload.history)
+        return ChatResponse(
+            answer=booking_result.message,
+            usage=_build_usage(route=route_usage),
+        )
+
+    rewritten, rewrite_usage = await rewrite_user_message(payload.message, payload.history)
     search_messages = _build_search_messages(payload.message, payload.history, rewritten.rewritten_message)
 
     context = []
@@ -86,14 +98,18 @@ async def chat(payload: ChatRequest) -> ChatResponse:
         break
 
     if not context:
-        return ChatResponse(answer="Le site ne traite pas de ce sujet.")
+        return ChatResponse(answer="Le site ne traite pas de ce sujet.", usage=_build_usage(route=route_usage, rewrite=rewrite_usage))
 
-    answer = await generate_answer(search_message, [item["content"] for item in context], payload.history)
+    answer, answer_usage = await generate_answer(search_message, [item["content"] for item in context], payload.history)
     sources = [
         Source(url=item["url"], title=item["title"], score=round(float(item["score"]), 4))
         for item in context[:3]
     ]
-    return ChatResponse(answer=answer, sources=sources)
+    return ChatResponse(
+        answer=answer,
+        sources=sources,
+        usage=_build_usage(route=route_usage, rewrite=rewrite_usage, answer=answer_usage),
+    )
 
 
 def _build_search_messages(message: str, history, rewritten_message: str) -> list[str]:
@@ -115,3 +131,26 @@ def _build_search_messages(message: str, history, rewritten_message: str) -> lis
             candidates.append(combined_conversation)
 
     return candidates
+
+
+def _build_usage(
+    route: ModelUsage | None = None,
+    rewrite: ModelUsage | None = None,
+    answer: ModelUsage | None = None,
+) -> ChatUsage | None:
+    if route is None and rewrite is None and answer is None:
+        return None
+
+    prompt_tokens = sum(item.prompt_tokens for item in [route, rewrite, answer] if item is not None)
+    completion_tokens = sum(item.completion_tokens for item in [route, rewrite, answer] if item is not None)
+    total_tokens = sum(item.total_tokens for item in [route, rewrite, answer] if item is not None)
+    return ChatUsage(
+        route=route,
+        rewrite=rewrite,
+        answer=answer,
+        total=ModelUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        ),
+    )
