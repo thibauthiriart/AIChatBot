@@ -6,6 +6,7 @@ Base d'agent conversationnel spécialisé pour un site web:
 - PostgreSQL.
 - Ingestion de pages du site et découpage en chunks.
 - Endpoint `/chat` qui répond uniquement à partir des contenus indexés.
+- Branche de prise de rendez-vous connectable à Google Calendar.
 - Widget Vue embeddable.
 
 ## Démarrage
@@ -121,3 +122,23 @@ La base inclut plusieurs garde-fous:
 Modele de routage par defaut: `OPENAI_ROUTER_MODEL=gpt-4.1-mini`.
 
 Pour un usage production, ajoutez une clé publique par site côté widget, une file de jobs pour l'indexation, et un rate limit distribué type Redis.
+
+## Reservation et Google Calendar
+
+Le meme endpoint `/chat` peut maintenant traiter une intention de reservation. Le flux reste cote serveur:
+
+- detection de l'intention `appointment`
+- collecte du nom, de l'email et d'une date explicite
+- lecture de vrais creneaux dans Google Calendar
+- creation de l'evenement uniquement apres confirmation explicite
+
+Variables a configurer:
+
+```text
+BOOKING_PROVIDER=google_calendar
+GOOGLE_CALENDAR_ID=your-calendar-id@group.calendar.google.com
+GOOGLE_SERVICE_ACCOUNT_FILE=/absolute/path/to/google-service-account.json
+GOOGLE_SERVICE_ACCOUNT_SUBJECT=
+```
+
+Le compte de service doit avoir acces en lecture/ecriture au calendrier cible. Si votre Google Workspace impose une delegation domaine, utilisez `GOOGLE_SERVICE_ACCOUNT_SUBJECT`.

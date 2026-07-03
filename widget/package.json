@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "build": "vite build"
+    "build": "vite build",
+    "test": "tsc -p tsconfig.test.json && node --test tests/chatPayload.test.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-vue": "^5.2.1",

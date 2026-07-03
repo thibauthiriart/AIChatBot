@@ -12,10 +12,20 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: Optional[str] = None
     openai_router_model: str = "gpt-4.1-mini"
-    openai_chat_model: str = "moonshotai/kimi-k2"
+    openai_chat_model: str = "moonshotai/kimi-k2.5"
     admin_api_token: str = ""
     chat_max_context_chunks: int = 6
     chat_rate_limit_per_minute: int = 10
+    booking_provider: str = "google_calendar"
+    booking_timezone_default: str = "Europe/Paris"
+    booking_slot_duration_minutes: int = 30
+    booking_max_suggestions: int = 3
+    booking_workday_start_hour: int = 9
+    booking_workday_end_hour: int = 17
+    booking_event_summary: str = "Premier rendez-vous"
+    google_calendar_id: str = ""
+    google_service_account_file: str = ""
+    google_service_account_subject: str = ""
     site_allowed_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
     )
