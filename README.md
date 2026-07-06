@@ -85,6 +85,7 @@ Documentation d'integration sur un site en production:
 
 ```text
 docs/integration-widget.md
+docs/setup-tokens-google-calendar.md
 ```
 
 Exemple d'intégration:

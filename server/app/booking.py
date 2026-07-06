@@ -34,6 +34,7 @@ class BookingContext:
     timezone_name: str | None = None
     requested_day: date | None = None
     requested_time: time | None = None
+    requested_period: str | None = None
     pending_start: datetime | None = None
 
 
@@ -74,10 +75,15 @@ class BookingService:
 
         selected_slot = _match_slot(slots, context.requested_time)
         if selected_slot is None:
+            suggested_slots = _select_suggested_slots(slots, context, self.settings.booking_max_suggestions)
             return BookingResult(
                 status="slot_selection",
-                message=_format_slot_prompt(context.requested_day, context.timezone_name or self.settings.booking_timezone_default, slots),
-                slots=slots,
+                message=_format_slot_prompt(
+                    context.requested_day,
+                    context.timezone_name or self.settings.booking_timezone_default,
+                    suggested_slots,
+                ),
+                slots=suggested_slots,
             )
 
         return BookingResult(
@@ -128,17 +134,22 @@ class BookingService:
         visitor_text = "\n".join(item.content for item in history if item.role == "visitor")
         combined_visitor_text = "\n".join(part for part in [visitor_text, message] if part.strip())
         last_agent_message = next((item.content for item in reversed(history) if item.role == "agent"), "")
+        requested_identity_fields = _extract_requested_identity_fields(last_agent_message)
 
         timezone_name = _extract_timezone(combined_visitor_text) or self.settings.booking_timezone_default
         requested_day = _extract_date(combined_visitor_text, timezone_name)
         requested_time = _extract_time(combined_visitor_text)
+        requested_period = _extract_period(combined_visitor_text)
         pending_start = _extract_pending_start(last_agent_message, timezone_name)
+        direct_name = _extract_direct_name_reply(message, requested_identity_fields)
+        direct_email = _extract_direct_email_reply(message, requested_identity_fields)
         return BookingContext(
-            name=_extract_name(combined_visitor_text),
-            email=_extract_email(combined_visitor_text),
+            name=_extract_name(combined_visitor_text) or direct_name,
+            email=_extract_email(combined_visitor_text) or direct_email,
             timezone_name=timezone_name,
             requested_day=requested_day,
             requested_time=requested_time,
+            requested_period=requested_period,
             pending_start=pending_start,
         )
 
@@ -177,9 +188,7 @@ class GoogleCalendarBookingProvider:
         slots: list[BookingSlot] = []
         slot_cursor = day_start
         slot_duration = timedelta(minutes=self.settings.booking_slot_duration_minutes)
-        max_suggestions = self.settings.booking_max_suggestions
-
-        while slot_cursor + slot_duration <= day_end and len(slots) < max_suggestions:
+        while slot_cursor + slot_duration <= day_end:
             slot_end = slot_cursor + slot_duration
             if not _has_overlap(slot_cursor, slot_end, busy_ranges):
                 slots.append(
@@ -350,6 +359,8 @@ def _extract_name(text: str) -> str | None:
     patterns = (
         r"\bje m[' ]appelle\s+([A-Za-zÀ-ÿ' -]{2,80})",
         r"\bmon nom est\s+([A-Za-zÀ-ÿ' -]{2,80})",
+        r"\bnom\s*[:=]\s*([A-Za-zÀ-ÿ' -]{2,80})",
+        r"\bnom\s+([A-Za-zÀ-ÿ' -]{2,80})",
         r"\bc[' ]est\s+([A-Za-zÀ-ÿ' -]{2,80})",
     )
     for pattern in patterns:
@@ -357,6 +368,19 @@ def _extract_name(text: str) -> str | None:
         if match:
             return match.group(1).strip(" .,!?:;")
     return None
+
+
+def _extract_requested_identity_fields(last_agent_message: str) -> set[str]:
+    normalized = _normalize(last_agent_message)
+    if "pour reserver" not in normalized:
+        return set()
+
+    requested: set[str] = set()
+    if "nom" in normalized:
+        requested.add("name")
+    if "email" in normalized:
+        requested.add("email")
+    return requested
 
 
 def _extract_timezone(text: str) -> str | None:
@@ -405,6 +429,47 @@ def _extract_time(text: str) -> time | None:
     return time(hour, minute)
 
 
+def _extract_period(text: str) -> str | None:
+    normalized = _normalize(text)
+    if "apres midi" in normalized or "apres-midi" in normalized:
+        return "afternoon"
+    if "matin" in normalized:
+        return "morning"
+    if "plus tard" in normalized:
+        return "later"
+    if "plus tot" in normalized or "plus tot le matin" in normalized:
+        return "earlier"
+    return None
+
+
+def _extract_direct_name_reply(message: str, requested_fields: set[str]) -> str | None:
+    if "name" not in requested_fields:
+        return None
+
+    labeled_name = _extract_name(message)
+    if labeled_name is not None:
+        return labeled_name
+
+    candidate = message.strip(" \n\t.,!?;:")
+    if not candidate or len(candidate) < 2 or len(candidate) > 80:
+        return None
+    if _extract_email(candidate) is not None:
+        return None
+    if _extract_date(candidate, "Europe/Paris") is not None or _extract_time(candidate) is not None:
+        return None
+    if _contains_booking_keyword(candidate) or _is_confirmation_message(candidate):
+        return None
+    if not re.fullmatch(r"[A-Za-zÀ-ÿ' -]{2,80}", candidate):
+        return None
+    return candidate
+
+
+def _extract_direct_email_reply(message: str, requested_fields: set[str]) -> str | None:
+    if "email" not in requested_fields:
+        return None
+    return _extract_email(message)
+
+
 def _extract_pending_start(last_agent_message: str, timezone_name: str) -> datetime | None:
     match = re.search(r"rendez-vous le (\d{4}-\d{2}-\d{2}) a (\d{2}:\d{2})", last_agent_message)
     if not match:
@@ -414,7 +479,9 @@ def _extract_pending_start(last_agent_message: str, timezone_name: str) -> datet
 
 def _is_confirmation_message(message: str) -> bool:
     normalized = _normalize(message.strip())
-    return normalized in {"oui", "oui.", "ok", "ok.", "je confirme", "confirme", "c'est confirme", "go"}
+    if normalized in {"oui", "oui.", "ok", "ok.", "je confirme", "confirme", "c'est confirme", "go"}:
+        return True
+    return bool(re.search(r"\b(oui|ok)\b", normalized) and re.search(r"\bconfirm", normalized))
 
 
 def _match_slot(slots: list[BookingSlot], requested_time: time | None) -> BookingSlot | None:
@@ -425,6 +492,33 @@ def _match_slot(slots: list[BookingSlot], requested_time: time | None) -> Bookin
         if slot_start.time().hour == requested_time.hour and slot_start.time().minute == requested_time.minute:
             return slot
     return None
+
+
+def _select_suggested_slots(slots: list[BookingSlot], context: BookingContext, max_suggestions: int) -> list[BookingSlot]:
+    if len(slots) <= max_suggestions:
+        return slots
+
+    prioritized = slots
+    if context.requested_time is not None:
+        prioritized = [
+            slot
+            for slot in slots
+            if datetime.fromisoformat(slot.start).time() >= context.requested_time
+        ] or slots
+    elif context.requested_period in {"afternoon", "later"}:
+        prioritized = [
+            slot
+            for slot in slots
+            if datetime.fromisoformat(slot.start).time() >= time(12, 0)
+        ] or slots
+    elif context.requested_period in {"morning", "earlier"}:
+        prioritized = [
+            slot
+            for slot in slots
+            if datetime.fromisoformat(slot.start).time() < time(12, 0)
+        ] or slots
+
+    return prioritized[:max_suggestions]
 
 
 def _format_slot_prompt(requested_day: date, timezone_name: str, slots: list[BookingSlot]) -> str:

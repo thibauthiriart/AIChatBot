@@ -28,12 +28,12 @@ class ChatSchemaTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ChatRequest(site_id="site_123", message="a" * 1201, history=[])
 
-    def test_rejects_history_longer_than_eight_messages(self) -> None:
+    def test_rejects_history_longer_than_twelve_messages(self) -> None:
         with self.assertRaises(ValidationError):
             ChatRequest(
                 site_id="site_123",
                 message="Bonjour",
-                history=[ConversationMessage(role="visitor", content=f"Message {index}") for index in range(9)],
+                history=[ConversationMessage(role="visitor", content=f"Message {index}") for index in range(13)],
             )
 
     def test_rejects_history_message_too_long(self) -> None:

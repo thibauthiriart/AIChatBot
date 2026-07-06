@@ -34,7 +34,7 @@ class ConversationMessage(BaseModel):
 class ChatRequest(BaseModel):
     site_id: str
     message: str = Field(min_length=1, max_length=1200)
-    history: list[ConversationMessage] = Field(default_factory=list, max_length=8)
+    history: list[ConversationMessage] = Field(default_factory=list, max_length=12)
 
 
 class RouteDecision(BaseModel):

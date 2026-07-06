@@ -4,7 +4,7 @@ export type ChatMessage = {
 }
 
 export const MAX_MESSAGE_LENGTH = 1200
-export const MAX_HISTORY_ITEMS = 6
+export const MAX_HISTORY_ITEMS = 12
 export const WELCOME_MESSAGE =
   'Bonjour, posez-moi une question sur le site. Je peux aussi vous orienter vers un premier echange ou un audit selon votre besoin.'
 
