@@ -28,5 +28,15 @@ CREATE TABLE IF NOT EXISTS chunks (
   UNIQUE(document_id, chunk_index)
 );
 
+CREATE TABLE IF NOT EXISTS chat_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  site_id UUID NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  client_ip TEXT NOT NULL,
+  user_message TEXT NOT NULL,
+  assistant_answer TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS chunks_site_idx ON chunks(site_id);
 CREATE INDEX IF NOT EXISTS documents_site_idx ON documents(site_id);
+CREATE INDEX IF NOT EXISTS chat_logs_site_created_idx ON chat_logs(site_id, created_at DESC);
