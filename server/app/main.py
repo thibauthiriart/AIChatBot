@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from server.app.booking import BookingService
@@ -9,7 +9,7 @@ from server.app.db import db
 from server.app.ingest import ingest_urls
 from server.app.openai_client import generate_answer, rewrite_user_message, route_user_message
 from server.app.retrieval import retrieve_context
-from server.app.schemas import ChatRequest, ChatResponse, ChatUsage, IngestRequest, IngestResult, ModelUsage, Site, SiteCreate, Source
+from server.app.schemas import ChatRequest, ChatResponse, ChatUsage, IngestRequest, IngestResult, ModelUsage, Site, SiteCreate, Source, WidgetConfigResponse
 from server.app.security import enforce_admin_token, enforce_origin, enforce_rate_limit
 
 settings = get_settings()
@@ -28,6 +28,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup() -> None:
     await db.connect()
+    await _ensure_chat_logging_schema()
 
 
 @app.on_event("shutdown")
@@ -38,6 +39,11 @@ async def shutdown() -> None:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/widget-config", response_model=WidgetConfigResponse, dependencies=[Depends(enforce_origin)])
+async def widget_config() -> WidgetConfigResponse:
+    return WidgetConfigResponse(widget_enabled=settings.widget_enabled)
 
 
 @app.post("/sites", response_model=Site, dependencies=[Depends(enforce_admin_token)])
@@ -66,22 +72,37 @@ async def ingest(payload: IngestRequest) -> IngestResult:
 
 
 @app.post("/chat", response_model=ChatResponse, dependencies=[Depends(enforce_origin), Depends(enforce_rate_limit)])
-async def chat(payload: ChatRequest) -> ChatResponse:
+async def chat(request: Request, payload: ChatRequest) -> ChatResponse:
+    if not settings.chat_service_enabled:
+        return await _respond_and_log(request, payload, ChatResponse(answer="service indisponible"))
+
     route, route_usage = await route_user_message(payload.message, payload.history)
     if route.decision != "allow":
-        return ChatResponse(answer="Ce n'est pas possible.", usage=_build_usage(route=route_usage))
+        return await _respond_and_log(
+            request,
+            payload,
+            ChatResponse(answer="Ce n'est pas possible.", usage=_build_usage(route=route_usage)),
+        )
 
     if route.category == "greeting":
-        return ChatResponse(
-            answer="Bonjour, comment puis-je vous aider au sujet du site ? Si vous le souhaitez, je peux aussi vous orienter vers un premier echange ou un audit selon votre besoin.",
-            usage=_build_usage(route=route_usage),
+        return await _respond_and_log(
+            request,
+            payload,
+            ChatResponse(
+                answer="Bonjour, comment puis-je vous aider au sujet du site ? Si vous le souhaitez, je peux aussi vous orienter vers un premier echange ou un audit selon votre besoin.",
+                usage=_build_usage(route=route_usage),
+            ),
         )
 
     if route.category == "appointment":
         booking_result = await booking_service.handle_message(payload.message, payload.history)
-        return ChatResponse(
-            answer=booking_result.message,
-            usage=_build_usage(route=route_usage),
+        return await _respond_and_log(
+            request,
+            payload,
+            ChatResponse(
+                answer=booking_result.message,
+                usage=_build_usage(route=route_usage),
+            ),
         )
 
     rewritten, rewrite_usage = await rewrite_user_message(payload.message, payload.history)
@@ -98,18 +119,80 @@ async def chat(payload: ChatRequest) -> ChatResponse:
         break
 
     if not context:
-        return ChatResponse(answer="Le site ne traite pas de ce sujet.", usage=_build_usage(route=route_usage, rewrite=rewrite_usage))
+        return await _respond_and_log(
+            request,
+            payload,
+            ChatResponse(answer="Le site ne traite pas de ce sujet.", usage=_build_usage(route=route_usage, rewrite=rewrite_usage)),
+        )
 
     answer, answer_usage = await generate_answer(search_message, [item["content"] for item in context], payload.history)
     sources = [
         Source(url=item["url"], title=item["title"], score=round(float(item["score"]), 4))
         for item in context[:3]
     ]
-    return ChatResponse(
-        answer=answer,
-        sources=sources,
-        usage=_build_usage(route=route_usage, rewrite=rewrite_usage, answer=answer_usage),
+    return await _respond_and_log(
+        request,
+        payload,
+        ChatResponse(
+            answer=answer,
+            sources=sources,
+            usage=_build_usage(route=route_usage, rewrite=rewrite_usage, answer=answer_usage),
+        ),
     )
+
+
+async def _respond_and_log(request: Request, payload: ChatRequest, response: ChatResponse) -> ChatResponse:
+    await _log_chat_interaction(
+        site_id=payload.site_id,
+        client_ip=_get_client_ip(request),
+        user_message=payload.message,
+        assistant_answer=response.answer,
+    )
+    return response
+
+
+async def _ensure_chat_logging_schema() -> None:
+    async with db.acquire() as connection:
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_logs (
+              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              site_id UUID NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+              client_ip TEXT NOT NULL,
+              user_message TEXT NOT NULL,
+              assistant_answer TEXT NOT NULL,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+        await connection.execute(
+            "CREATE INDEX IF NOT EXISTS chat_logs_site_created_idx ON chat_logs(site_id, created_at DESC)"
+        )
+
+
+async def _log_chat_interaction(site_id: str, client_ip: str, user_message: str, assistant_answer: str) -> None:
+    async with db.acquire() as connection:
+        await connection.execute(
+            """
+            INSERT INTO chat_logs(site_id, client_ip, user_message, assistant_answer)
+            VALUES($1::uuid, $2, $3, $4)
+            """,
+            site_id,
+            client_ip,
+            user_message,
+            assistant_answer,
+        )
+
+
+def _get_client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "").strip()
+    if forwarded_for:
+        first_ip = forwarded_for.split(",", maxsplit=1)[0].strip()
+        if first_ip:
+            return first_ip
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
 
 
 def _build_search_messages(message: str, history, rewritten_message: str) -> list[str]:

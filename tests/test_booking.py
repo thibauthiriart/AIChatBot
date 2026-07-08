@@ -76,6 +76,15 @@ class BookingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("14:00", result.message)
         self.assertEqual(len(result.slots), 3)
 
+    async def test_accepts_short_french_year_format(self) -> None:
+        history = [
+            ConversationMessage(role="visitor", content="Je m'appelle Alice Martin"),
+            ConversationMessage(role="visitor", content="Mon email est alice@example.com"),
+        ]
+        result = await self.service.handle_message("Je veux un rendez-vous le 20/07/26", history)
+        self.assertEqual(result.status, "slot_selection")
+        self.assertIn("20/07/2026", result.message)
+
     async def test_requests_confirmation_for_selected_slot(self) -> None:
         history = [
             ConversationMessage(role="visitor", content="Je m'appelle Alice Martin"),

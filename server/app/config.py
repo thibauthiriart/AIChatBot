@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     openai_router_model: str = "gpt-4.1-mini"
     openai_chat_model: str = "moonshotai/kimi-k2.5"
     admin_api_token: str = ""
+    widget_enabled: bool = True
+    chat_service_enabled: bool = True
     chat_max_context_chunks: int = 6
     chat_rate_limit_per_minute: int = 10
     booking_provider: str = "google_calendar"

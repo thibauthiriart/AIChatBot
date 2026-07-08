@@ -100,3 +100,7 @@ class ChatResponse(BaseModel):
     answer: str
     sources: list[Source] = []
     usage: Optional[ChatUsage] = None
+
+
+class WidgetConfigResponse(BaseModel):
+    widget_enabled: bool

@@ -109,6 +109,27 @@ cd widget
 npm run dev
 ```
 
+## Feature Flags
+
+Deux flags `.env` permettent de couper rapidement le widget ou le service de chat:
+
+```env
+WIDGET_ENABLED=true
+CHAT_SERVICE_ENABLED=true
+```
+
+- `WIDGET_ENABLED=false`: le widget ne se monte plus sur le site, meme si le script est charge.
+- `CHAT_SERVICE_ENABLED=false`: l'endpoint `/chat` repond toujours `service indisponible`.
+
+Exemple pour desactiver temporairement tout le dispositif:
+
+```env
+WIDGET_ENABLED=false
+CHAT_SERVICE_ENABLED=false
+```
+
+Redemarrez l'API apres modification du `.env`.
+
 ## Sécurité applicative
 
 La base inclut plusieurs garde-fous:

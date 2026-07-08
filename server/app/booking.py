@@ -413,6 +413,12 @@ def _extract_date(text: str, timezone_name: str) -> date | None:
     fr_match = re.search(r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b", text)
     if fr_match:
         return date(int(fr_match.group(3)), int(fr_match.group(2)), int(fr_match.group(1)))
+
+    fr_short_year_match = re.search(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2})\b", text)
+    if fr_short_year_match:
+        year = int(fr_short_year_match.group(3))
+        full_year = 2000 + year if year <= 69 else 1900 + year
+        return date(full_year, int(fr_short_year_match.group(2)), int(fr_short_year_match.group(1)))
     return None
 
 

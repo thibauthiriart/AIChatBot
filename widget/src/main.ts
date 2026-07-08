@@ -25,8 +25,27 @@ function mount(selector: string, options: WidgetOptions) {
   createApp(ChatWidget, options).mount(target)
 }
 
+async function isWidgetEnabled(apiUrl: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${apiUrl.replace(/\/$/, '')}/widget-config`)
+    if (!response.ok) {
+      return true
+    }
+
+    const data = await response.json()
+    return data.widget_enabled !== false
+  } catch {
+    return true
+  }
+}
+
 window.AgentIAWidget = { mount }
 
 if (window.AgentIAConfig) {
-  mount('#agentia-widget', window.AgentIAConfig)
+  void isWidgetEnabled(window.AgentIAConfig.apiUrl).then((enabled) => {
+    if (!enabled) {
+      return
+    }
+    mount('#agentia-widget', window.AgentIAConfig!)
+  })
 }

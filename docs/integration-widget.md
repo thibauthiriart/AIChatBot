@@ -53,6 +53,27 @@ Si le site existe avec et sans `www`, ajoutez les deux:
 SITE_ALLOWED_ORIGINS=https://votre-site.com,https://www.votre-site.com
 ```
 
+## Activer ou desactiver le widget et le chat
+
+Deux flags `.env` cote API permettent de controler le comportement sans modifier le snippet du site:
+
+```env
+WIDGET_ENABLED=true
+CHAT_SERVICE_ENABLED=true
+```
+
+- `WIDGET_ENABLED=false`: le widget reste masque et ne se monte pas sur la page.
+- `CHAT_SERVICE_ENABLED=false`: le widget reste visible, mais chaque message recoit la reponse `service indisponible`.
+
+Exemple de coupure complete:
+
+```env
+WIDGET_ENABLED=false
+CHAT_SERVICE_ENABLED=false
+```
+
+Apres modification du `.env`, redemarrez l'API pour appliquer les nouveaux flags.
+
 ## Recuperer le site_id
 
 Pour declarer un site:
@@ -232,6 +253,8 @@ OPENAI_API_KEY=sk-your-key
 OPENAI_ROUTER_MODEL=gpt-4.1-mini
 OPENAI_CHAT_MODEL=moonshotai/kimi-k2.5
 ADMIN_API_TOKEN=un-token-long-et-secret
+WIDGET_ENABLED=true
+CHAT_SERVICE_ENABLED=true
 CHAT_MAX_CONTEXT_CHUNKS=6
 CHAT_RATE_LIMIT_PER_MINUTE=20
 SITE_ALLOWED_ORIGINS=https://www.votre-site.com
