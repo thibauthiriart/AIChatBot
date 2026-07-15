@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     openai_router_model: str = "gpt-4.1-mini"
     openai_chat_model: str = "moonshotai/kimi-k2.5"
     admin_api_token: str = ""
+    noota_ingest_token: str = ""
+    default_scope_name: str = "Base documentaire principale"
+    default_scope_base_url: str = "https://assistant.local"
+    noota_google_drive_root_folder_id: str = ""
+    noota_google_drive_scan_limit: int = 100
     widget_enabled: bool = True
     chat_service_enabled: bool = True
     chat_max_context_chunks: int = 6
@@ -28,6 +33,14 @@ class Settings(BaseSettings):
     google_calendar_id: str = ""
     google_service_account_file: str = ""
     google_service_account_subject: str = ""
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_from_name: str = "Assistant de gestion"
+    smtp_use_starttls: bool = True
+    smtp_use_ssl: bool = False
     site_allowed_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
     )

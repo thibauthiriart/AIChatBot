@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from server.app.config import Settings, get_settings
-from server.app.schemas import BookingConfirmation, BookingRequest, BookingResult, BookingSlot, ConversationMessage
+from server.app.schemas import BookingConfirmation, BookingRequest, BookingResult, BookingSlot, CalendarEventRequest, ConversationMessage
 
 
 class BookingProviderError(RuntimeError):
@@ -24,6 +24,9 @@ class BookingProvider(Protocol):
         ...
 
     async def create_appointment(self, request: BookingRequest) -> BookingConfirmation:
+        ...
+
+    async def create_event(self, request: CalendarEventRequest) -> BookingConfirmation:
         ...
 
 
@@ -128,6 +131,7 @@ class BookingService:
                 f"{local_start.strftime('%H:%M')} ({timezone_name})."
             ),
             confirmation=confirmation,
+            request=request,
         )
 
     def _build_context(self, message: str, history: list[ConversationMessage]) -> BookingContext:
@@ -203,7 +207,28 @@ class GoogleCalendarBookingProvider:
         return slots
 
     async def create_appointment(self, request: BookingRequest) -> BookingConfirmation:
+        return await self.create_event(
+            CalendarEventRequest(
+                summary=request.summary,
+                start=request.start,
+                end=request.end,
+                timezone=request.timezone,
+                description=request.description,
+                attendee_name=request.name,
+                attendee_email=request.email,
+            )
+        )
+
+    async def create_event(self, request: CalendarEventRequest) -> BookingConfirmation:
         self._validate_configuration()
+        start_at = datetime.fromisoformat(request.start)
+        end_at = datetime.fromisoformat(request.end)
+        busy_ranges = await self._fetch_busy_ranges(start_at, end_at, request.timezone)
+        if _has_overlap(start_at, end_at, busy_ranges):
+            raise BookingProviderError(
+                f"Le creneau {start_at.astimezone(ZoneInfo(request.timezone)).strftime('%d/%m/%Y %H:%M')} "
+                f"({request.timezone}) est deja occupe."
+            )
         access_token = await self._get_access_token()
         calendar_id = quote(self.settings.google_calendar_id, safe="")
         payload = {
@@ -212,8 +237,8 @@ class GoogleCalendarBookingProvider:
             "start": {"dateTime": request.start, "timeZone": request.timezone},
             "end": {"dateTime": request.end, "timeZone": request.timezone},
         }
-        if self.settings.google_service_account_subject:
-            payload["attendees"] = [{"email": request.email, "displayName": request.name}]
+        if self.settings.google_service_account_subject and request.attendee_email.strip():
+            payload["attendees"] = [{"email": request.attendee_email.strip(), "displayName": request.attendee_name.strip()}]
 
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.post(
@@ -222,7 +247,10 @@ class GoogleCalendarBookingProvider:
                 json=payload,
             )
         if response.status_code >= 400:
-            raise BookingProviderError(f"Impossible de creer le rendez-vous Google Calendar ({response.status_code}).")
+            raise BookingProviderError(
+                f"Impossible de creer le rendez-vous Google Calendar ({response.status_code}): "
+                f"{_extract_google_error_detail(response)}"
+            )
 
         data = response.json()
         return BookingConfirmation(event_id=str(data.get("id", "")), html_link=data.get("htmlLink"))
@@ -256,7 +284,10 @@ class GoogleCalendarBookingProvider:
                 json=payload,
             )
         if response.status_code >= 400:
-            raise BookingProviderError(f"Impossible de lire les disponibilites Google Calendar ({response.status_code}).")
+            raise BookingProviderError(
+                f"Impossible de lire les disponibilites Google Calendar ({response.status_code}): "
+                f"{_extract_google_error_detail(response)}"
+            )
 
         data = response.json()
         raw_busy = data.get("calendars", {}).get(self.settings.google_calendar_id, {}).get("busy", [])
@@ -293,6 +324,8 @@ class GoogleCalendarBookingProvider:
 
 
 def is_booking_follow_up(message: str, history: list[ConversationMessage]) -> bool:
+    if is_appointment_lookup_request(message, history):
+        return False
     if _contains_booking_keyword(message):
         return True
     last_agent_message = next((item.content for item in reversed(history) if item.role == "agent"), "")
@@ -305,6 +338,68 @@ def is_booking_follow_up(message: str, history: list[ConversationMessage]) -> bo
         "Proposez une autre date",
     )
     return any(marker.lower() in last_agent_message.lower() for marker in follow_up_markers)
+
+
+def is_appointment_lookup_request(message: str, history: list[ConversationMessage]) -> bool:
+    combined_history = " ".join(item.content for item in history[-6:] if item.role in {"visitor", "agent"})
+    normalized = _normalize(message)
+    normalized_history = _normalize(combined_history)
+    has_appointment_term = any(term in normalized for term in ("rendez-vous", "rendez vous", "rdv"))
+    if not has_appointment_term:
+        return False
+
+    has_booking_action_marker = any(
+        marker in normalized
+        for marker in ("je veux", "prendre", "reserver", "reservation", "creneau", "disponibilite", "appel")
+    )
+    if has_booking_action_marker:
+        return False
+
+    has_time_marker = any(
+        marker in normalized
+        for marker in ("aujourd'hui", "aujourdhui", "du jour", "ce jour", "today")
+    )
+    has_lookup_marker = any(
+        marker in normalized
+        for marker in (
+            "quels",
+            "quel",
+            "liste",
+            "affiche",
+            "montre",
+            "donne",
+            "combien",
+            "les rdv",
+            "les rendez-vous",
+            "les rendez vous",
+            "y a t il",
+            "est ce qu'il y a",
+            "est ce qu il y a",
+            "ont ete",
+            "etaient",
+            "pris",
+        )
+    )
+    has_state_marker = any(
+        marker in normalized
+        for marker in (
+            "programme",
+            "programmes",
+            "prevu",
+            "prevus",
+            "planifie",
+            "planifies",
+            "reserve",
+            "reserves",
+            "pris",
+            "prises",
+        )
+    )
+    has_meeting_context = any(
+        marker in f"{normalized} {normalized_history}"
+        for marker in ("reunion", "reunions", "meeting", "compte rendu", "compte-rendu", "ces reunions", "cette reunion")
+    )
+    return (has_lookup_marker or has_state_marker) and (has_time_marker or has_meeting_context or has_state_marker)
 
 
 def _build_provider(settings: Settings) -> BookingProvider:
@@ -344,6 +439,27 @@ def _normalize(value: str) -> str:
         .replace("ù", "u")
         .replace("ç", "c")
     )
+
+
+def _extract_google_error_detail(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        text = response.text.strip()
+        return text[:300] if text else "aucun detail retourne par Google"
+
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = str(error.get("message", "")).strip()
+        status = str(error.get("status", "")).strip()
+        details = []
+        if status:
+            details.append(status)
+        if message:
+            details.append(message)
+        if details:
+            return " - ".join(details)
+    return str(payload)[:300] if payload else "aucun detail retourne par Google"
 
 
 def _extract_email(text: str) -> str | None:

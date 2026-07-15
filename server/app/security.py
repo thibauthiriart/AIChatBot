@@ -47,3 +47,21 @@ def enforce_admin_token(x_admin_token: Optional[str] = Header(default=None)) -> 
     expected = get_settings().admin_api_token
     if expected and x_admin_token != expected:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin token")
+
+
+def enforce_noota_or_admin_token(
+    x_noota_token: Optional[str] = Header(default=None),
+    x_admin_token: Optional[str] = Header(default=None),
+) -> None:
+    settings = get_settings()
+    if settings.noota_ingest_token:
+        if x_noota_token != settings.noota_ingest_token:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Noota token")
+        return
+
+    if settings.admin_api_token:
+        if x_admin_token != settings.admin_api_token:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin token")
+        return
+
+    raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="No ingestion token configured")
