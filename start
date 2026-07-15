@@ -27,8 +27,8 @@ cleanup() {
     kill "$API_PID" >/dev/null 2>&1 || true
   fi
 
-  if [[ -n "${WIDGET_PID:-}" ]] && kill -0 "$WIDGET_PID" >/dev/null 2>&1; then
-    kill "$WIDGET_PID" >/dev/null 2>&1 || true
+  if [[ -n "${FRONTEND_PID:-}" ]] && kill -0 "$FRONTEND_PID" >/dev/null 2>&1; then
+    kill "$FRONTEND_PID" >/dev/null 2>&1 || true
   fi
 
   wait >/dev/null 2>&1 || true
@@ -51,7 +51,7 @@ wait_for_port() {
 }
 
 wait_for_process_exit() {
-  if [[ -z "${API_PID:-}" && -z "${WIDGET_PID:-}" ]]; then
+  if [[ -z "${API_PID:-}" && -z "${FRONTEND_PID:-}" ]]; then
     return 0
   fi
 
@@ -62,9 +62,9 @@ wait_for_process_exit() {
       return 1
     fi
 
-    if [[ -n "${WIDGET_PID:-}" ]] && ! kill -0 "$WIDGET_PID" >/dev/null 2>&1; then
-      wait "$WIDGET_PID" || true
-      echo "Le widget s'est arrêté." >&2
+    if [[ -n "${FRONTEND_PID:-}" ]] && ! kill -0 "$FRONTEND_PID" >/dev/null 2>&1; then
+      wait "$FRONTEND_PID" || true
+      echo "Le dashboard front s'est arrêté." >&2
       return 1
     fi
 
@@ -99,9 +99,9 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
-if [[ ! -d "$ROOT_DIR/widget/node_modules" ]]; then
-  echo "Erreur: dépendances front absentes dans widget/node_modules." >&2
-  echo "Installez-les avec: cd widget && npm install" >&2
+if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
+  echo "Erreur: dépendances front absentes dans frontend/node_modules." >&2
+  echo "Installez-les avec: cd frontend && npm install" >&2
   exit 1
 fi
 
@@ -139,19 +139,19 @@ else
   fi
 fi
 
-WIDGET_EXISTING_PID="$(port_listener_pid 5173 || true)"
-if [[ -n "$WIDGET_EXISTING_PID" ]]; then
-  echo "Port 5173 déjà utilisé. Réutilisation du serveur widget existant."
+FRONTEND_EXISTING_PID="$(port_listener_pid 5173 || true)"
+if [[ -n "$FRONTEND_EXISTING_PID" ]]; then
+  echo "Port 5173 déjà utilisé. Réutilisation du serveur front existant."
 else
-  echo "Démarrage du widget sur http://localhost:5173 ..."
+  echo "Démarrage du dashboard front sur http://localhost:5173 ..."
   (
-    cd "$ROOT_DIR/widget"
+    cd "$ROOT_DIR/frontend"
     npm run dev
   ) &
-  WIDGET_PID=$!
+  FRONTEND_PID=$!
 
   if ! wait_for_port 127.0.0.1 5173 20; then
-    echo "Erreur: le widget ne s'est pas lancé correctement sur 5173." >&2
+    echo "Erreur: le front ne s'est pas lancé correctement sur 5173." >&2
     exit 1
   fi
 fi
