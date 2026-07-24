@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date
+from datetime import date, datetime
 
-from server.app.booking import BookingService
+from server.app.booking import BookingProviderError, BookingService, GoogleCalendarBookingProvider, is_appointment_lookup_request, is_booking_follow_up
 from server.app.config import Settings
-from server.app.schemas import BookingConfirmation, BookingRequest, BookingSlot, ConversationMessage
+from server.app.schemas import BookingConfirmation, BookingRequest, BookingSlot, CalendarEventRequest, ConversationMessage
 
 
 class FakeBookingProvider:
@@ -45,6 +45,25 @@ class FakeBookingProvider:
     async def create_appointment(self, request: BookingRequest) -> BookingConfirmation:
         self.created_request = request
         return BookingConfirmation(event_id="evt_123", html_link="https://calendar.google.com/event?eid=123")
+
+
+class FakeGoogleCalendarBookingProvider(GoogleCalendarBookingProvider):
+    def __init__(self, settings: Settings, busy_ranges: list[tuple[datetime, datetime]] | None = None) -> None:
+        super().__init__(settings)
+        self.busy_ranges = busy_ranges or []
+        self.create_event_called = False
+
+    async def _fetch_busy_ranges(
+        self,
+        day_start: datetime,
+        day_end: datetime,
+        timezone_name: str,
+    ) -> list[tuple[datetime, datetime]]:
+        self.last_busy_query = (day_start, day_end, timezone_name)
+        return self.busy_ranges
+
+    async def _get_access_token(self) -> str:
+        return "token"
 
 
 class BookingServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -167,6 +186,66 @@ class BookingServiceTests(unittest.IsolatedAsyncioTestCase):
         result = await self.service.handle_message("oui je confirme", history)
         self.assertEqual(result.status, "confirmed")
         self.assertIn("04/07/2026", result.message)
+
+    async def test_detects_today_appointment_lookup_request(self) -> None:
+        self.assertTrue(is_appointment_lookup_request("Quels sont les rdv programmes pour aujourd'hui ?", []))
+
+    async def test_today_appointment_lookup_is_not_treated_as_booking_follow_up(self) -> None:
+        history = [
+            ConversationMessage(role="agent", content="Pour reserver, j'ai besoin de votre nom, votre email."),
+        ]
+        self.assertFalse(is_booking_follow_up("Quels sont les rdv programmes pour aujourd'hui ?", history))
+
+    async def test_detects_meeting_related_appointment_lookup_request(self) -> None:
+        history = [
+            ConversationMessage(
+                role="agent",
+                content='Maquette validee : le compte rendu "Google Meet - meet.google.com/fkk-pkds-uyz" serait remis en forme, ajoute a la base puis envoye.',
+            ),
+        ]
+        self.assertTrue(is_appointment_lookup_request("quels sont les rdvs que ont etes pris pendants ces reunions", history))
+
+    async def test_meeting_related_lookup_is_not_treated_as_booking_follow_up(self) -> None:
+        history = [
+            ConversationMessage(role="agent", content="Pour reserver, j'ai besoin de votre nom, votre email."),
+            ConversationMessage(
+                role="agent",
+                content='Maquette validee : le compte rendu "Google Meet - meet.google.com/fkk-pkds-uyz" serait remis en forme, ajoute a la base puis envoye.',
+            ),
+        ]
+        self.assertFalse(is_booking_follow_up("quels sont les rdvs que ont etes pris pendants ces reunions", history))
+
+
+class GoogleCalendarBookingProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_refuses_event_creation_when_slot_is_busy(self) -> None:
+        settings = Settings(
+            booking_provider="google_calendar",
+            booking_timezone_default="Europe/Paris",
+            google_calendar_id="calendar@example.com",
+            google_service_account_file="/tmp/service-account.json",
+        )
+        provider = FakeGoogleCalendarBookingProvider(
+            settings,
+            busy_ranges=[
+                (
+                    datetime.fromisoformat("2026-07-20T15:45:00+02:00"),
+                    datetime.fromisoformat("2026-07-20T16:15:00+02:00"),
+                )
+            ],
+        )
+
+        with self.assertRaises(BookingProviderError) as exc:
+            await provider.create_event(
+                CalendarEventRequest(
+                    summary="Test",
+                    start="2026-07-20T16:00:00+02:00",
+                    end="2026-07-20T16:30:00+02:00",
+                    timezone="Europe/Paris",
+                    description="",
+                )
+            )
+
+        self.assertIn("deja occupe", str(exc.exception))
 
 
 if __name__ == "__main__":

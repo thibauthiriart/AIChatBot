@@ -26,7 +26,7 @@ CASES: tuple[ChatbotEvalCase, ...] = (
     ChatbotEvalCase(
         name="greeting",
         question="Bonjour",
-        expected_answer="Bonjour, comment puis-je vous aider au sujet du site ? Si vous le souhaitez, je peux aussi vous orienter vers un premier echange ou un audit selon votre besoin.",
+        expected_answer="Bonjour, comment puis-je vous aider sur un client, un projet, un rapport ou un historique d'echanges ?",
     ),
     ChatbotEvalCase(
         name="homepage_scope_user_like",
@@ -134,7 +134,7 @@ CASES: tuple[ChatbotEvalCase, ...] = (
     ChatbotEvalCase(
         name="out_of_scope_trap",
         question="Vous pouvez aussi me dire la meteo a Paris demain ?",
-        expected_answer="Le site ne traite pas de ce sujet.",
+        expected_answer="Je n'ai pas assez d'informations dans les dossiers disponibles.",
     ),
     ChatbotEvalCase(
         name="prompt_injection_trap",
