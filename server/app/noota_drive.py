@@ -2,19 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import date, datetime, time, timedelta, timezone
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 from zoneinfo import ZoneInfo
 
 import httpx
 
 from server.app.config import Settings, get_settings
+from server.app.client_memory import extract_task_candidates_from_report, is_actionable_task_title
 from server.app.db import db
-from server.app.noota import format_noota_report, import_noota_report
+from server.app.noota import build_noota_task_key, format_noota_report, import_noota_report, import_noota_report_with_override
 from server.app.schemas import CalendarEventSuggestion, NootaDriveFileInfo, NootaDriveImportedItem, NootaDrivePendingItem, NootaDriveStatusResponse, NootaDriveSyncResponse, NootaReportImport
+
+
+logger = logging.getLogger(__name__)
 
 
 class NootaDriveSyncError(RuntimeError):
@@ -92,30 +97,49 @@ class GoogleDriveNootaSyncService:
         if not root_folder_id:
             raise NootaDriveSyncError("NOOTA_GOOGLE_DRIVE_ROOT_FOLDER_ID est manquant.")
 
-        files = await self._list_docx_files(root_folder_id, limit)
+        scan_limit = max(limit, self.settings.noota_google_drive_scan_limit)
+        files = await self._list_docx_files(root_folder_id, scan_limit)
         pending_items: list[NootaDrivePendingItem] = []
 
         for drive_file in files:
-            if await _is_already_imported("google_drive", drive_file.id):
+            try:
+                if await _is_already_imported("google_drive", drive_file.id):
+                    continue
+                _, report, formatted_report, suggested_appointments = await self._build_pending_report(drive_file)
+            except NootaDriveSyncError:
+                logger.warning("noota_drive_pending_file_skipped external_id=%s file_name=%s", drive_file.id, drive_file.name)
                 continue
-
-            _, report, formatted_report, suggested_appointments = await self._build_pending_report(drive_file)
+            except Exception:
+                logger.exception("noota_drive_pending_file_failed external_id=%s file_name=%s", drive_file.id, drive_file.name)
+                continue
             pending_items.append(
                 NootaDrivePendingItem(
                     external_id=drive_file.id,
                     file_name=drive_file.name,
                     client_name=report.client_name,
+                    detected_client_name=report.client_name,
                     project_name=report.project_name,
                     meeting_title=report.meeting_title,
                     meeting_at=report.meeting_at,
                     formatted_report=formatted_report,
                     suggested_appointments=suggested_appointments,
+                    suggested_tasks=_extract_suggested_tasks(report, formatted_report),
                 )
             )
+            if len(pending_items) >= limit:
+                break
 
         return pending_items
 
-    async def import_one(self, scope_id: str, external_id: str, folder_id: str | None = None) -> NootaDriveImportedItem:
+    async def import_one(
+        self,
+        scope_id: str,
+        external_id: str,
+        folder_id: str | None = None,
+        formatted_report_override: str | None = None,
+        client_name_override: str | None = None,
+        selected_task_keys: set[str] | None = None,
+    ) -> NootaDriveImportedItem:
         if await _is_already_imported("google_drive", external_id):
             raise NootaDriveSyncError("Ce compte rendu est deja importe.")
 
@@ -129,12 +153,18 @@ class GoogleDriveNootaSyncService:
             raise NootaDriveSyncError("Compte rendu introuvable dans Google Drive.")
 
         _, report, _, _ = await self._build_pending_report(drive_file)
-        imported = await import_noota_report(scope_id, report)
+        imported = await import_noota_report_with_override(
+            scope_id,
+            report,
+            formatted_report_override,
+            client_name_override,
+            selected_task_keys,
+        )
         await _mark_imported("google_drive", drive_file.id, imported.artifact.id)
         return NootaDriveImportedItem(
             external_id=drive_file.id,
             file_name=drive_file.name,
-            client_name=report.client_name,
+            client_name=imported.client.name,
             project_name=report.project_name,
             artifact_id=imported.artifact.id,
         )
@@ -156,9 +186,12 @@ class GoogleDriveNootaSyncService:
             raise NootaDriveSyncError("NOOTA_GOOGLE_DRIVE_ROOT_FOLDER_ID est manquant.")
 
         files = await self._list_docx_files(root_folder_id, max(limit, 20))
+        import_status_by_id: dict[str, bool] = {}
         pending_count = 0
         for drive_file in files:
-            if not await _is_already_imported("google_drive", drive_file.id):
+            imported = await _is_already_imported("google_drive", drive_file.id)
+            import_status_by_id[drive_file.id] = imported
+            if not imported:
                 pending_count += 1
 
         return NootaDriveStatusResponse(
@@ -170,14 +203,16 @@ class GoogleDriveNootaSyncService:
                     external_id=item.id,
                     file_name=item.name,
                     modified_time=item.modified_time,
+                    imported=import_status_by_id.get(item.id, False),
+                    pending=not import_status_by_id.get(item.id, False),
                 )
-                for item in files[: min(limit, 10)]
+                for item in files[: min(limit, 50)]
             ],
         )
 
     async def _build_pending_report(self, drive_file: DriveFile) -> tuple[DriveFile, NootaReportImport, str, list[CalendarEventSuggestion]]:
         content = await self._download_file(drive_file)
-        report = _parse_noota_docx(content, drive_file.name)
+        report = _parse_noota_docx(content, drive_file.name, drive_file.id)
         formatted_report = format_noota_report(report, report.client_name, report.project_name)
         suggested_appointments = _extract_suggested_appointments(report, formatted_report, self.settings.booking_timezone_default)
         return drive_file, report, formatted_report, suggested_appointments
@@ -280,7 +315,7 @@ class GoogleDriveNootaSyncService:
         return await asyncio.to_thread(load_token)
 
 
-def _parse_noota_docx(content: bytes, file_name: str) -> NootaReportImport:
+def _parse_noota_docx(content: bytes, file_name: str, external_id: str = "") -> NootaReportImport:
     paragraphs = _extract_docx_paragraphs(content)
     sections = _split_sections(paragraphs)
     stem = Path(file_name).stem
@@ -314,8 +349,47 @@ def _parse_noota_docx(content: bytes, file_name: str) -> NootaReportImport:
         transcript="\n".join(paragraphs).strip(),
         participants=participants,
         source_url="",
-        external_id=stem,
+        external_id=external_id or stem,
     )
+
+
+def _extract_suggested_tasks(report: NootaReportImport, formatted_report: str) -> list[dict[str, str]]:
+    suggestions: list[dict[str, str]] = []
+    seen_titles: set[str] = set()
+
+    for action in report.action_items:
+        title = action.description.strip()
+        normalized = title.lower()
+        if not title or normalized in seen_titles or not is_actionable_task_title(title, action.owner, action.due_date):
+            continue
+        seen_titles.add(normalized)
+        suggestions.append(
+            {
+                "key": build_noota_task_key(title, action.owner, action.due_date),
+                "title": title,
+                "owner": action.owner.strip(),
+                "due_date": action.due_date.strip(),
+                "source_excerpt": title,
+            }
+        )
+
+    for candidate in extract_task_candidates_from_report(formatted_report):
+        title = candidate.get("title", "").strip()
+        normalized = title.lower()
+        if not title or normalized in seen_titles:
+            continue
+        seen_titles.add(normalized)
+        suggestions.append(
+            {
+                "key": build_noota_task_key(title, candidate.get("owner", ""), candidate.get("due_date", "")),
+                "title": title,
+                "owner": candidate.get("owner", ""),
+                "due_date": candidate.get("due_date", ""),
+                "source_excerpt": candidate.get("source_excerpt", ""),
+            }
+        )
+
+    return suggestions[:20]
 
 
 def _extract_suggested_appointments(
@@ -529,9 +603,12 @@ def _extract_docx_paragraphs(content: bytes) -> list[str]:
     from xml.etree import ElementTree as ET
 
     namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-    with ZipFile(io.BytesIO(content)) as archive:
-        document_xml = archive.read("word/document.xml")
-    root = ET.fromstring(document_xml)
+    try:
+        with ZipFile(io.BytesIO(content)) as archive:
+            document_xml = archive.read("word/document.xml")
+        root = ET.fromstring(document_xml)
+    except (BadZipFile, KeyError, ET.ParseError) as exc:
+        raise NootaDriveSyncError("Le fichier Drive n'est pas un document Word exploitable.") from exc
     paragraphs: list[str] = []
     for paragraph in root.findall(".//w:p", namespace):
         texts = [node.text or "" for node in paragraph.findall(".//w:t", namespace)]

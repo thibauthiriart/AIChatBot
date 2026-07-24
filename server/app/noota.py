@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from server.app.db import db
+from server.app.client_memory import (
+    create_client_project_task,
+    extract_task_candidates_from_report,
+    is_actionable_task_title,
+    mark_client_artifact_tasks_processed,
+)
 from server.app.schemas import (
     ClientArtifactSummary,
     ClientEventSummary,
@@ -20,6 +27,8 @@ async def import_noota_report(scope_id: str, payload: NootaReportImport) -> Noot
     project = await _resolve_or_create_project(client["id"], payload.project_name)
     formatted_report = format_noota_report(payload, client["name"], project["name"] if project else "")
     artifact = await _create_artifact(client["id"], project["id"] if project else None, payload, formatted_report)
+    extracted_count = await _create_tasks_from_report(client["id"], project["id"] if project else None, artifact["id"], payload, formatted_report)
+    await mark_client_artifact_tasks_processed(artifact["id"], extracted_count)
     event = await _create_event(client["id"], project["id"] if project else None, payload)
     return NootaImportResponse(
         client=ClientSummary(**client),
@@ -28,6 +37,48 @@ async def import_noota_report(scope_id: str, payload: NootaReportImport) -> Noot
         event=ClientEventSummary(**event),
         formatted_report=formatted_report,
     )
+
+
+async def import_noota_report_with_override(
+    scope_id: str,
+    payload: NootaReportImport,
+    formatted_report_override: str | None = None,
+    client_name_override: str | None = None,
+    selected_task_keys: set[str] | None = None,
+) -> NootaImportResponse:
+    payload = _apply_client_name_override(payload, client_name_override)
+    client = await _resolve_or_create_client(scope_id, payload)
+    project = await _resolve_or_create_project(client["id"], payload.project_name)
+    formatted_report = (
+        formatted_report_override.strip()
+        if formatted_report_override and formatted_report_override.strip()
+        else format_noota_report(payload, client["name"], project["name"] if project else "")
+    )
+    artifact = await _create_artifact(client["id"], project["id"] if project else None, payload, formatted_report)
+    extracted_count = await _create_tasks_from_report(
+        client["id"],
+        project["id"] if project else None,
+        artifact["id"],
+        payload,
+        formatted_report,
+        selected_task_keys,
+    )
+    await mark_client_artifact_tasks_processed(artifact["id"], extracted_count)
+    event = await _create_event(client["id"], project["id"] if project else None, payload)
+    return NootaImportResponse(
+        client=ClientSummary(**client),
+        project=ClientProjectSummary(**project) if project else None,
+        artifact=ClientArtifactSummary(**artifact),
+        event=ClientEventSummary(**event),
+        formatted_report=formatted_report,
+    )
+
+
+def _apply_client_name_override(payload: NootaReportImport, client_name_override: str | None) -> NootaReportImport:
+    normalized_client_name = (client_name_override or "").strip()
+    if not normalized_client_name:
+        return payload
+    return payload.model_copy(update={"client_name": normalized_client_name})
 
 
 def format_noota_report(payload: NootaReportImport, client_name: str, project_name: str = "") -> str:
@@ -295,3 +346,59 @@ async def _create_event(client_id: str, project_id: str | None, payload: NootaRe
             payload.meeting_at or "",
         )
     return dict(row)
+
+
+async def _create_tasks_from_report(
+    client_id: str,
+    project_id: str | None,
+    artifact_id: str,
+    payload: NootaReportImport,
+    formatted_report: str,
+    selected_task_keys: set[str] | None = None,
+) -> int:
+    created_keys: set[str] = set()
+    for action in payload.action_items:
+        if not is_actionable_task_title(action.description, action.owner, action.due_date):
+            continue
+        task_key = build_noota_task_key(action.description, action.owner, action.due_date)
+        if task_key in created_keys:
+            continue
+        if selected_task_keys is not None and task_key not in selected_task_keys:
+            continue
+        created_keys.add(task_key)
+        await create_client_project_task(
+            client_id,
+            project_id,
+            artifact_id,
+            action.description,
+            action.owner,
+            action.due_date,
+            action.description,
+        )
+
+    for candidate in extract_task_candidates_from_report(formatted_report):
+        task_key = build_noota_task_key(candidate["title"], candidate.get("owner", ""), candidate.get("due_date", ""))
+        if task_key in created_keys:
+            continue
+        if selected_task_keys is not None and task_key not in selected_task_keys:
+            continue
+        created_keys.add(task_key)
+        await create_client_project_task(
+            client_id,
+            project_id,
+            artifact_id,
+            candidate["title"],
+            candidate.get("owner", ""),
+            candidate.get("due_date", ""),
+            candidate.get("source_excerpt", ""),
+        )
+    return len(created_keys)
+
+
+def build_noota_task_key(title: str, owner: str = "", due_date: str = "") -> str:
+    parts = [_normalize_task_key_part(title), _normalize_task_key_part(owner), _normalize_task_key_part(due_date)]
+    return "|".join(parts)
+
+
+def _normalize_task_key_part(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().lower())

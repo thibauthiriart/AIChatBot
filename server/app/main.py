@@ -8,18 +8,45 @@ import re
 import unicodedata
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 from server.app.booking import BookingProviderError, BookingService, is_appointment_lookup_request
-from server.app.client_memory import ensure_client_memory_schema, resolve_client_for_chat, retrieve_client_context, retrieve_recent_global_context
+from server.app.client_memory import (
+    ensure_client_memory_schema,
+    list_client_project_tasks,
+    resolve_client_for_chat,
+    retrieve_client_context,
+    retrieve_recent_global_context,
+    suggest_tasks_from_client_reports,
+    update_client_project_task_status,
+)
 from server.app.config import get_settings
 from server.app.db import db
 from server.app.ingest import ingest_urls
 from server.app.mailer import MailerError, SmtpMailer
 from server.app.noota import import_noota_report
 from server.app.noota_drive import GoogleDriveNootaSyncService, NootaDriveSyncError, ensure_noota_drive_schema
-from server.app.openai_client import NO_CONTEXT_MESSAGE, generate_answer, rewrite_user_message, route_user_message
+from server.app.openai_client import NO_CONTEXT_MESSAGE, generate_answer, rewrite_noota_report, rewrite_user_message, route_user_message
+from server.app.offer_service import (
+    add_offer_project_file,
+    add_offer_project_email,
+    create_offer_project,
+    create_offer_reference,
+    create_team_profile,
+    delete_offer_project,
+    ensure_offer_schema,
+    generate_offer_export,
+    generate_offer_markdown,
+    build_offer_later_tasks_answer,
+    get_offer_export,
+    get_offer_project_context,
+    handle_offer_project_message,
+    is_offer_later_task_lookup_request,
+    list_offer_projects,
+    update_offer_project,
+)
 from server.app.retrieval import retrieve_context
 from server.app.schemas import (
     AppointmentNotification,
@@ -32,10 +59,13 @@ from server.app.schemas import (
     ClientArtifactSummary,
     ClientContextSummary,
     ClientCreate,
+    ClientUpdate,
     ClientEventCreate,
     ClientEventSummary,
     ClientProjectCreate,
     ClientProjectSummary,
+    ClientProjectTaskStatusUpdate,
+    ClientProjectTaskSummary,
     ClientSummary,
     IngestRequest,
     IngestResult,
@@ -45,7 +75,10 @@ from server.app.schemas import (
     NootaDriveImportAndEmailResponse,
     NootaDriveImportOneRequest,
     NootaDriveImportedItem,
+    NootaDrivePendingItem,
     NootaDrivePendingListResponse,
+    NootaDriveRewriteReportRequest,
+    NootaDriveRewriteReportResponse,
     NootaDriveScheduleSuggestionRequest,
     NootaDriveScheduleSuggestionResponse,
     NootaDriveStatusResponse,
@@ -53,9 +86,23 @@ from server.app.schemas import (
     NootaDriveSyncResponse,
     NootaImportResponse,
     NootaReportImport,
+    OfferAssistantResponse,
+    OfferProjectContextResponse,
+    OfferProjectCreate,
+    OfferProjectEmailCreate,
+    OfferProjectEmailSummary,
+    OfferProjectFileSummary,
+    OfferProjectExportSummary,
+    OfferProjectMessageCreate,
+    OfferProjectSummary,
+    OfferProjectUpdate,
+    OfferReferenceCreate,
+    OfferReferenceSummary,
     Site,
     SiteCreate,
     Source,
+    TeamProfileCreate,
+    TeamProfileSummary,
     WidgetConfigResponse,
 )
 from server.app.security import enforce_admin_token, enforce_noota_or_admin_token, enforce_origin, enforce_rate_limit
@@ -72,8 +119,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Admin-Token"],
 )
 
 
@@ -83,6 +130,7 @@ async def startup() -> None:
     await _ensure_chat_logging_schema()
     await ensure_client_memory_schema()
     await ensure_noota_drive_schema()
+    await ensure_offer_schema()
     await _ensure_default_scope()
 
 
@@ -149,13 +197,38 @@ async def sync_noota_google_drive(payload: NootaDriveSyncRequest) -> NootaDriveS
 
 @app.get("/integrations/noota/google-drive/pending", response_model=NootaDrivePendingListResponse, dependencies=[Depends(enforce_origin)])
 async def list_pending_noota_google_drive_reports(site_id: Optional[str] = None, folder_id: Optional[str] = None, limit: int = 5) -> NootaDrivePendingListResponse:
-    await _resolve_scope_id(site_id)
     bounded_limit = min(max(limit, 1), 20)
     try:
+        await _resolve_scope_id(site_id)
         items = await noota_drive_sync_service.list_pending(folder_id, bounded_limit)
     except NootaDriveSyncError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.warning("noota_drive_pending_unavailable site_id=%s folder_id=%s reason=%s", site_id, folder_id, str(exc))
+        return NootaDrivePendingListResponse(items=[])
+    except Exception as exc:
+        logger.exception("noota_drive_pending_list_failed site_id=%s folder_id=%s", site_id, folder_id)
+        return NootaDrivePendingListResponse(items=[])
     return NootaDrivePendingListResponse(items=items)
+
+
+@app.get("/integrations/noota/google-drive/pending/{external_id}", response_model=NootaDrivePendingItem, dependencies=[Depends(enforce_origin)])
+async def get_pending_noota_google_drive_report(external_id: str, site_id: Optional[str] = None, folder_id: Optional[str] = None) -> NootaDrivePendingItem:
+    await _resolve_scope_id(site_id)
+    try:
+        drive_file, report, formatted_report, suggested_appointments = await noota_drive_sync_service.get_pending_report(external_id, folder_id)
+    except NootaDriveSyncError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return NootaDrivePendingItem(
+        external_id=drive_file.id,
+        file_name=drive_file.name,
+        client_name=report.client_name,
+        detected_client_name=report.client_name,
+        project_name=report.project_name,
+        meeting_title=report.meeting_title,
+        meeting_at=report.meeting_at,
+        formatted_report=formatted_report,
+        suggested_appointments=suggested_appointments,
+    )
 
 
 @app.post("/integrations/noota/google-drive/import-one", response_model=NootaDriveImportedItem, dependencies=[Depends(enforce_origin)])
@@ -172,26 +245,58 @@ async def import_and_email_pending_noota_google_drive_report(payload: NootaDrive
     scope_id = await _resolve_scope_id(payload.site_id)
     try:
         drive_file, report, formatted_report, suggested_appointments = await noota_drive_sync_service.get_pending_report(payload.external_id, payload.folder_id)
+        client_name = payload.client_name.strip() or report.client_name
+        final_report = payload.formatted_report.strip() or formatted_report
         subject = f"Compte rendu - {report.meeting_title}"
-        await mailer.send_report(payload.recipient_email, subject, formatted_report)
-        scheduled_appointments = await _schedule_report_appointments(
+        await mailer.send_report(payload.recipient_email, subject, final_report)
+        imported_item = await noota_drive_sync_service.import_one(
             scope_id,
-            report.client_name,
-            report.meeting_title,
-            formatted_report,
-            suggested_appointments,
+            drive_file.id,
+            payload.folder_id,
+            final_report,
+            client_name,
+            set(payload.selected_task_keys) if payload.selected_task_keys is not None else None,
         )
-        imported_item = await noota_drive_sync_service.import_one(scope_id, drive_file.id, payload.folder_id)
     except (NootaDriveSyncError, MailerError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        scheduled_appointments = await _schedule_report_appointments(
+            scope_id,
+            client_name,
+            report.meeting_title,
+            final_report,
+            suggested_appointments,
+        )
     except BookingProviderError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.warning(
+            "appointment_schedule_skipped_after_import scope_id=%s external_id=%s client_name=%s reason=%s",
+            scope_id,
+            payload.external_id,
+            client_name,
+            str(exc),
+        )
+        scheduled_appointments = []
 
     return NootaDriveImportAndEmailResponse(
         imported_item=imported_item,
         recipient_email=payload.recipient_email,
         mail_sent=True,
         scheduled_appointments=scheduled_appointments,
+    )
+
+
+@app.post("/integrations/noota/google-drive/rewrite-report", response_model=NootaDriveRewriteReportResponse, dependencies=[Depends(enforce_origin)])
+async def rewrite_pending_noota_google_drive_report(payload: NootaDriveRewriteReportRequest) -> NootaDriveRewriteReportResponse:
+    await _resolve_scope_id(payload.site_id)
+    try:
+        rewritten_report, _ = await rewrite_noota_report(payload.formatted_report)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return NootaDriveRewriteReportResponse(
+        external_id=payload.external_id,
+        formatted_report=rewritten_report,
     )
 
 
@@ -221,7 +326,7 @@ async def schedule_pending_noota_google_drive_suggestion(payload: NootaDriveSche
         suggestion_response = await _schedule_suggested_appointment(
             scope_id=scope_id,
             external_id=payload.external_id,
-            client_name=report.client_name,
+            client_name=payload.client_name.strip() or report.client_name,
             meeting_title=report.meeting_title,
             formatted_report=formatted_report,
             title=payload.title,
@@ -296,6 +401,81 @@ async def create_client(payload: ClientCreate) -> ClientSummary:
             payload.external_ref,
         )
     return ClientSummary(**dict(row))
+
+
+@app.get("/clients", response_model=list[ClientSummary], dependencies=[Depends(enforce_origin)])
+async def list_clients(site_id: Optional[str] = None) -> list[ClientSummary]:
+    scope_id = await _resolve_scope_id(site_id)
+    async with db.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            SELECT
+              id::text,
+              site_id::text,
+              name,
+              NULLIF(short_name, '') AS short_name,
+              aliases,
+              sector,
+              status,
+              summary,
+              external_ref
+            FROM clients
+            WHERE site_id = $1::uuid
+            ORDER BY updated_at DESC, name ASC
+            """,
+            scope_id,
+        )
+    return [ClientSummary(**dict(row)) for row in rows]
+
+
+@app.patch("/clients/{client_id}", response_model=ClientSummary, dependencies=[Depends(enforce_admin_token)])
+async def update_client(client_id: str, payload: ClientUpdate) -> ClientSummary:
+    async with db.acquire() as connection:
+        row = await connection.fetchrow(
+            """
+            UPDATE clients
+            SET
+              name = $2,
+              short_name = $3,
+              aliases = $4::text[],
+              sector = $5,
+              status = $6,
+              summary = $7,
+              external_ref = $8,
+              updated_at = now()
+            WHERE id = $1::uuid
+            RETURNING
+              id::text,
+              site_id::text,
+              name,
+              NULLIF(short_name, '') AS short_name,
+              aliases,
+              sector,
+              status,
+              summary,
+              external_ref
+            """,
+            client_id,
+            payload.name,
+            payload.short_name or "",
+            payload.aliases,
+            payload.sector,
+            payload.status,
+            payload.summary,
+            payload.external_ref,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Unknown client_id")
+    return ClientSummary(**dict(row))
+
+
+@app.delete("/clients/{client_id}", dependencies=[Depends(enforce_admin_token)])
+async def delete_client(client_id: str) -> dict[str, bool]:
+    async with db.acquire() as connection:
+        result = await connection.execute("DELETE FROM clients WHERE id = $1::uuid", client_id)
+    if result == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Unknown client_id")
+    return {"ok": True}
 
 
 @app.post("/clients/{client_id}/projects", response_model=ClientProjectSummary, dependencies=[Depends(enforce_admin_token)])
@@ -401,7 +581,156 @@ async def get_client_context(client_id: str, site_id: Optional[str] = None) -> C
         projects=[ClientProjectSummary(**item) for item in payload["projects"]],
         artifacts=[ClientArtifactSummary(**item) for item in payload["artifacts"]],
         recent_events=[ClientEventSummary(**item) for item in payload["recent_events"]],
+        tasks=[ClientProjectTaskSummary(**item) for item in payload["tasks"]],
     )
+
+
+@app.get("/clients/{client_id}/tasks", response_model=list[ClientProjectTaskSummary], dependencies=[Depends(enforce_origin)])
+async def get_client_project_tasks(client_id: str, site_id: Optional[str] = None) -> list[ClientProjectTaskSummary]:
+    scope_id = await _resolve_scope_id(site_id)
+    try:
+        return [ClientProjectTaskSummary(**item) for item in await list_client_project_tasks(scope_id, client_id)]
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Unknown client_id") from exc
+
+
+@app.post("/clients/{client_id}/tasks/suggest", response_model=list[ClientProjectTaskSummary], dependencies=[Depends(enforce_origin)])
+async def suggest_client_project_tasks(client_id: str, site_id: Optional[str] = None) -> list[ClientProjectTaskSummary]:
+    scope_id = await _resolve_scope_id(site_id)
+    try:
+        await suggest_tasks_from_client_reports(scope_id, client_id)
+        return [ClientProjectTaskSummary(**item) for item in await list_client_project_tasks(scope_id, client_id)]
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Unknown client_id") from exc
+
+
+@app.patch("/clients/tasks/{task_id}", response_model=ClientProjectTaskSummary, dependencies=[Depends(enforce_origin)])
+async def update_client_project_task(task_id: str, payload: ClientProjectTaskStatusUpdate, site_id: Optional[str] = None) -> ClientProjectTaskSummary:
+    scope_id = await _resolve_scope_id(site_id)
+    try:
+        return ClientProjectTaskSummary(**await update_client_project_task_status(scope_id, task_id, payload.status))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Unknown task_id") from exc
+
+
+@app.get("/offers/projects", response_model=list[OfferProjectSummary], dependencies=[Depends(enforce_origin)])
+async def get_offer_projects(site_id: Optional[str] = None) -> list[OfferProjectSummary]:
+    scope_id = await _resolve_scope_id(site_id)
+    return [OfferProjectSummary(**item) for item in await list_offer_projects(scope_id)]
+
+
+@app.post("/offers/projects", response_model=OfferProjectSummary, dependencies=[Depends(enforce_origin)])
+async def create_offer_project_route(payload: OfferProjectCreate) -> OfferProjectSummary:
+    scope_id = await _resolve_scope_id(payload.site_id)
+    item = await create_offer_project(scope_id, payload.title, payload.client_name, payload.sector, payload.request_summary)
+    return OfferProjectSummary(**item)
+
+
+@app.patch("/offers/projects/{project_id}", response_model=OfferProjectSummary, dependencies=[Depends(enforce_origin)])
+async def update_offer_project_route(project_id: str, payload: OfferProjectUpdate) -> OfferProjectSummary:
+    try:
+        item = await update_offer_project(project_id, payload.model_dump())
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return OfferProjectSummary(**item)
+
+
+@app.delete("/offers/projects/{project_id}", dependencies=[Depends(enforce_origin)])
+async def delete_offer_project_route(project_id: str) -> dict[str, bool]:
+    await delete_offer_project(project_id)
+    return {"ok": True}
+
+
+@app.get("/offers/projects/{project_id}/context", response_model=OfferProjectContextResponse, dependencies=[Depends(enforce_origin)])
+async def get_offer_project_context_route(project_id: str, site_id: Optional[str] = None) -> OfferProjectContextResponse:
+    scope_id = await _resolve_scope_id(site_id)
+    try:
+        payload = await get_offer_project_context(scope_id, project_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return OfferProjectContextResponse(**payload)
+
+
+@app.post("/offers/projects/{project_id}/messages", response_model=OfferAssistantResponse, dependencies=[Depends(enforce_origin)])
+async def create_offer_project_message_route(project_id: str, payload: OfferProjectMessageCreate, site_id: Optional[str] = None) -> OfferAssistantResponse:
+    scope_id = await _resolve_scope_id(site_id)
+    try:
+        response = await handle_offer_project_message(scope_id, project_id, payload.content)
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return OfferAssistantResponse(**response)
+
+
+@app.post("/offers/projects/{project_id}/emails", response_model=OfferProjectEmailSummary, dependencies=[Depends(enforce_origin)])
+async def create_offer_project_email_route(project_id: str, payload: OfferProjectEmailCreate) -> OfferProjectEmailSummary:
+    try:
+        item = await add_offer_project_email(project_id, payload.subject, payload.sender, payload.content)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return OfferProjectEmailSummary(**item)
+
+
+@app.post("/offers/projects/{project_id}/files", response_model=OfferProjectFileSummary, dependencies=[Depends(enforce_origin)])
+async def create_offer_project_file_route(project_id: str, file: UploadFile = File(...)) -> OfferProjectFileSummary:
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Le fichier est vide.")
+    try:
+        item = await add_offer_project_file(project_id, file.filename or "document", file.content_type or "", content)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return OfferProjectFileSummary(**item)
+
+
+@app.post("/offers/projects/{project_id}/generate", response_model=OfferProjectContextResponse, dependencies=[Depends(enforce_origin)])
+async def generate_offer_project_route(project_id: str, site_id: Optional[str] = None) -> OfferProjectContextResponse:
+    scope_id = await _resolve_scope_id(site_id)
+    try:
+        await generate_offer_markdown(scope_id, project_id)
+        payload = await get_offer_project_context(scope_id, project_id)
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return OfferProjectContextResponse(**payload)
+
+
+@app.post("/offers/projects/{project_id}/exports/{export_format}", response_model=OfferProjectExportSummary, dependencies=[Depends(enforce_origin)])
+async def create_offer_project_export_route(project_id: str, export_format: str) -> OfferProjectExportSummary:
+    if export_format not in {"docx", "pdf"}:
+        raise HTTPException(status_code=400, detail="Unsupported export format")
+    try:
+        item = await generate_offer_export(project_id, export_format)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return OfferProjectExportSummary(**item)
+
+
+@app.get("/offers/projects/{project_id}/exports/{export_id}/download", dependencies=[Depends(enforce_origin)])
+async def download_offer_project_export_route(project_id: str, export_id: str) -> Response:
+    try:
+        metadata, content = await get_offer_export(project_id, export_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(
+        content=content,
+        media_type=metadata["content_type"],
+        headers={"Content-Disposition": f"attachment; filename={metadata['filename']}"},
+    )
+
+
+@app.post("/offers/references", response_model=OfferReferenceSummary, dependencies=[Depends(enforce_admin_token)])
+async def create_offer_reference_route(payload: OfferReferenceCreate) -> OfferReferenceSummary:
+    scope_id = await _resolve_scope_id(payload.site_id)
+    item = await create_offer_reference(scope_id, payload.model_dump())
+    return OfferReferenceSummary(**item)
+
+
+@app.post("/offers/team-profiles", response_model=TeamProfileSummary, dependencies=[Depends(enforce_admin_token)])
+async def create_team_profile_route(payload: TeamProfileCreate) -> TeamProfileSummary:
+    scope_id = await _resolve_scope_id(payload.site_id)
+    item = await create_team_profile(scope_id, payload.model_dump())
+    return TeamProfileSummary(**item)
 
 
 @app.post("/chat", response_model=ChatResponse, dependencies=[Depends(enforce_origin), Depends(enforce_rate_limit)])
@@ -409,6 +738,19 @@ async def chat(request: Request, payload: ChatRequest) -> ChatResponse:
     scope_id = await _resolve_scope_id(payload.site_id)
     if not settings.chat_service_enabled:
         return await _respond_and_log(request, scope_id, payload, ChatResponse(answer="service indisponible"))
+
+    if _is_appointment_reschedule_request(payload.message, payload.history):
+        return await _respond_and_log(
+            request,
+            scope_id,
+            payload,
+            ChatResponse(
+                answer=(
+                    "Je ne sais pas encore deplacer automatiquement un rendez-vous existant. "
+                    "Je peux en revanche vous aider a verifier les creneaux disponibles ou a preparer un nouveau rendez-vous."
+                )
+            ),
+        )
 
     drive_action_response = await _handle_drive_report_action_request(scope_id, payload.message, payload.history)
     if drive_action_response is not None:
@@ -424,6 +766,14 @@ async def chat(request: Request, payload: ChatRequest) -> ChatResponse:
             scope_id,
             payload,
             ChatResponse(answer=await _build_appointment_lookup_answer(scope_id, payload.message, payload.history)),
+        )
+
+    if is_offer_later_task_lookup_request(payload.message):
+        return await _respond_and_log(
+            request,
+            scope_id,
+            payload,
+            ChatResponse(answer=await build_offer_later_tasks_answer(scope_id, payload.message)),
         )
 
     route, route_usage = await route_user_message(payload.message, payload.history)
@@ -486,6 +836,7 @@ async def chat(request: Request, payload: ChatRequest) -> ChatResponse:
         scope_id,
         payload.message,
         payload.history,
+        rewritten_message=rewritten.rewritten_message,
         explicit_client_id=payload.client_id,
     )
 
@@ -1052,7 +1403,35 @@ def _is_drive_report_check_request(message: str, history: list) -> bool:
         "importe",
         "importe",
     ]
-    return any(token in normalized for token in checks) and any(token in normalized for token in intents)
+    return (
+        _has_drive_report_scope(normalized)
+        and any(token in normalized for token in checks)
+        and any(token in normalized for token in intents)
+    )
+
+
+def _is_appointment_reschedule_request(message: str, history: list) -> bool:
+    combined = " ".join([item.content for item in history[-4:] if getattr(item, "content", "").strip()] + [message]).strip()
+    normalized = _normalize_text(combined)
+    has_appointment_term = any(term in normalized for term in ("rendez-vous", "rendez vous", "rdv", "creneau"))
+    if not has_appointment_term:
+        return False
+    return any(
+        term in normalized
+        for term in (
+            "deplacer",
+            "decale",
+            "decaler",
+            "reporter",
+            "reprogrammer",
+            "replanifier",
+            "changer le creneau",
+            "changer de creneau",
+            "modifier le creneau",
+            "modifier le rendez-vous",
+            "deplacer le creneau",
+        )
+    )
 
 
 async def _handle_drive_report_action_request(
@@ -1195,6 +1574,8 @@ async def _handle_drive_report_summary_request(
         return None
     if not any(term in normalized for term in summary_terms):
         return None
+    if not _has_drive_report_scope(normalized):
+        return None
 
     pending_items = await noota_drive_sync_service.list_pending(None, 20)
     if not pending_items:
@@ -1221,6 +1602,25 @@ async def _handle_drive_report_summary_request(
         answer=answer,
         sources=[Source(url=f"drive://pending/{matched.external_id}", title=matched.file_name, score=1.0)],
     )
+
+
+def _has_drive_report_scope(normalized_message: str) -> bool:
+    explicit_markers = [
+        "drive",
+        "google drive",
+        "noota",
+        "en attente",
+        "attente",
+        "a valider",
+        "a valider",
+        "validation",
+        "valider",
+        "popup",
+        "import",
+        "file",
+        "file noota",
+    ]
+    return any(marker in normalized_message for marker in explicit_markers)
 
 
 async def _fetch_recent_imported_reports(scope_id: str, limit: int) -> list[dict]:

@@ -174,6 +174,28 @@ async def rewrite_user_message(message: str, history: list[ConversationMessage])
         return RewriteDecision(rewritten_message=message, used_history=False), _extract_usage(response.usage)
 
 
+async def rewrite_noota_report(formatted_report: str) -> tuple[str, ModelUsage | None]:
+    settings = get_settings()
+    system_prompt = (
+        "Tu reformules un compte rendu de reunion en francais. "
+        "Tu dois ameliorer la clarte, la fluidite et la qualite redactionnelle sans inventer d'information. "
+        "Conserve strictement les faits, les dates, les noms, les decisions, les actions, les responsables et les echeances. "
+        "Conserve une structure proche du texte fourni avec les memes sections si elles existent. "
+        "N'ajoute aucun commentaire meta. "
+        "Reponds uniquement avec le compte rendu reformule en texte brut."
+    )
+    response = await get_openai_client().chat.completions.create(
+        model=settings.openai_chat_model,
+        temperature=0.3,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": formatted_report},
+        ],
+    )
+    content = (response.choices[0].message.content or formatted_report).strip()
+    return _strip_markdown(content) or formatted_report, _extract_usage(response.usage)
+
+
 def _extract_usage(usage: Any) -> ModelUsage | None:
     if usage is None:
         return None
