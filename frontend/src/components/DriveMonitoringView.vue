@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { formatConversationDate, useAgentiaState } from '../composables/useAgentiaState'
+import type { DriveStatusFile } from '../types'
 
 const state = useAgentiaState()
+const validationError = ref('')
 
 const driveMetrics = computed(() => [
   {
@@ -18,10 +20,44 @@ const driveMetrics = computed(() => [
     value: String(state.driveStatus.value?.imported_reports ?? 0)
   }
 ])
+
+const pendingReportsById = computed(() =>
+  new Map(state.pendingNootaReports.value.map((report) => [report.external_id, report]))
+)
+
+const driveFiles = computed(() =>
+  (state.driveStatus.value?.latest_files ?? []).map((file) => ({
+    ...file,
+    pendingReport: pendingReportsById.value.get(file.external_id) ?? null,
+    canValidate: file.pending || !file.imported
+  }))
+)
+
+async function openValidationForFile(file: DriveStatusFile) {
+  validationError.value = ''
+  let report = pendingReportsById.value.get(file.external_id)
+  if (!report) {
+    await state.syncPendingNootaReports()
+    report = pendingReportsById.value.get(file.external_id)
+  }
+  if (!report) {
+    try {
+      report = await state.fetchPendingNootaReport(file.external_id)
+    } catch (error) {
+      validationError.value = error instanceof Error ? error.message : `Impossible d'ouvrir la validation pour "${file.file_name}".`
+      return
+    }
+  }
+  if (report) {
+    state.openPendingNootaPreview(report)
+    return
+  }
+  validationError.value = `Impossible d'ouvrir la validation pour "${file.file_name}". Le rapport complet n'est pas disponible dans les elements en attente.`
+}
 </script>
 
 <template>
-  <section class="page-view">
+  <section class="page-view page-view--drive">
     <div class="page-view__hero page-view__hero--compact">
       <div>
         <p class="section-eyebrow">Drive</p>
@@ -73,8 +109,8 @@ const driveMetrics = computed(() => [
           </div>
         </div>
 
-        <div v-if="state.pendingNootaToasts.value.length" class="info-card__stack">
-          <article v-for="report in state.pendingNootaToasts.value" :key="report.external_id" class="list-card list-card--action">
+        <div v-if="state.pendingNootaReports.value.length" class="info-card__stack">
+          <article v-for="report in state.pendingNootaReports.value" :key="report.external_id" class="list-card list-card--action">
             <p class="list-card__title">{{ report.meeting_title }}</p>
             <p class="list-card__meta">{{ report.client_name }}<template v-if="report.project_name"> · {{ report.project_name }}</template></p>
             <p class="list-card__meta">{{ report.file_name }}</p>
@@ -90,14 +126,28 @@ const driveMetrics = computed(() => [
         <div class="info-card__header">
           <div>
             <p class="section-eyebrow">Fichiers</p>
-            <h3>Derniers elements detectes</h3>
+            <h3>Documents Drive detectes</h3>
           </div>
         </div>
 
-        <div v-if="state.driveStatus.value?.latest_files?.length" class="info-card__stack">
-          <article v-for="file in state.driveStatus.value.latest_files" :key="file.external_id" class="list-card">
-            <p class="list-card__title">{{ file.file_name }}</p>
-            <p class="list-card__meta">Modifie le {{ formatConversationDate(file.modified_time) }}</p>
+        <div v-if="driveFiles.length" class="info-card__stack">
+          <p v-if="validationError" class="modal-card__status modal-card__status--error">{{ validationError }}</p>
+          <article v-for="file in driveFiles" :key="file.external_id" class="list-card list-card--action">
+            <div>
+              <p class="list-card__title">{{ file.file_name }}</p>
+              <p class="list-card__meta">Modifie le {{ formatConversationDate(file.modified_time) }}</p>
+              <p class="list-card__meta">
+                {{ file.imported ? 'Deja importe' : 'En attente de validation' }}
+              </p>
+            </div>
+            <button
+              v-if="file.canValidate"
+              type="button"
+              class="secondary-button"
+              @click="openValidationForFile(file)"
+            >
+              Validation
+            </button>
           </article>
         </div>
         <p v-else-if="!state.driveStatusLoading.value" class="empty-state">
